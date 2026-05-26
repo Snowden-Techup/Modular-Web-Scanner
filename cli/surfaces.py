@@ -90,8 +90,6 @@ async def _resolve_crawled_surfaces(
             pass
 
     print(f"[*] Crawler mode: discovered {len(surfaces)} attack surface(s).")
-    if crawler.crawl_path_log_path:
-        print(f"[*] Crawl path trace written: {crawler.crawl_path_log_path}")
     surfaces_output = (getattr(args, "surfaces_output", "") or "").strip()
     if surfaces_output:
         try:
