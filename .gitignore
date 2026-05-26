@@ -4,3 +4,4 @@ __pycache__/
 scan_report.json
 attack_surfaces.json
 scan_report_full.json
+crawl_path_debug*.txt

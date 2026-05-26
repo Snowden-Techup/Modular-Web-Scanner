@@ -184,11 +184,6 @@ class SurfaceBuilder:
             # DVWA CSRF page changes current user password; exclude from active testing.
             if "/vulnerabilities/csrf/" in str(surface.url).lower():
                 continue
-            # dynamic token이 필요한 surface는 테스트 대상에서 제외
-            # (토큰 갱신 오버헤드/실패로 인한 지연 완화 목적)
-            if getattr(surface, "dynamic_tokens", None):
-                continue
-
             sig = self._generate_signature(surface)
             if sig in self._seen_signatures: continue
 

@@ -78,7 +78,10 @@ class URLFilter:
         self.max_url_length = max_url_length
         self.allowed_schemes = {'http', 'https'}
 
-        self.url_structure_counts = {}
+        # (path, query_key_names) -> {dom_skeleton_hash: fetch_count}
+        self.dom_structure_counts: dict[tuple, dict[str, int]] = {}
+        # (path, query_key_names) -> form action tokens already fully parsed
+        self.bucket_form_actions: dict[tuple, set[str]] = {}
         self.max_same_structure = max_same_structure
 
         patterns = self.DEFAULT_EXCLUDED_PATTERNS.copy()
@@ -157,11 +160,92 @@ class URLFilter:
             logger.debug(f"안전성 검증 실패 ({url}): {e}")
             return False
 
+    @staticmethod
+    def url_bucket(url: str) -> tuple[str, tuple[str, ...]] | None:
+        """Bucket key: (path, sorted query param names). None when no query string."""
+        parsed = urlparse(url)
+        if not parsed.query:
+            return None
+        query_keys = tuple(sorted(parse_qs(parsed.query).keys()))
+        return (parsed.path, query_keys)
+
+    def reset_dom_structure_state(self) -> None:
+        """Clear DOM structure counters (new crawl run)."""
+        self.dom_structure_counts.clear()
+        self.bucket_form_actions.clear()
+
+    @staticmethod
+    def structure_bucket(url: str) -> tuple[str, tuple[str, ...]] | None:
+        """
+        Bucket for DOM/form-action limits.
+
+        Uses query key names when present; otherwise (path, ()) so path-only
+        URLs still participate in per-bucket form-action tracking.
+        """
+        bucket = URLFilter.url_bucket(url)
+        if bucket is not None:
+            return bucket
+        parsed = urlparse(url)
+        if not parsed.path:
+            return None
+        return (parsed.path, ())
+
+    def novel_form_actions(
+        self, url: str, form_actions: frozenset[str] | set[str]
+    ) -> set[str]:
+        """Form actions on this page not yet fully parsed in the URL bucket."""
+        bucket = self.structure_bucket(url)
+        if bucket is None or not form_actions:
+            return set()
+        seen = self.bucket_form_actions.setdefault(bucket, set())
+        return {action for action in form_actions if action not in seen}
+
+    def mark_form_actions_processed(
+        self, url: str, form_actions: frozenset[str] | set[str]
+    ) -> None:
+        """Record form actions observed during a full page parse."""
+        bucket = self.structure_bucket(url)
+        if bucket is None or not form_actions:
+            return
+        self.bucket_form_actions.setdefault(bucket, set()).update(form_actions)
+
+    def page_allows_processing(
+        self,
+        url: str,
+        visit_count: int,
+        form_actions: frozenset[str] | set[str],
+    ) -> bool:
+        """Coarse DOM cap, or at least one never-before-seen form action in bucket."""
+        if self.dom_visit_allows_processing(visit_count):
+            return True
+        return bool(self.novel_form_actions(url, form_actions))
+
+    def record_dom_visit(self, url: str, dom_hash: str) -> int:
+        """
+        Record a successful page parse for this DOM skeleton.
+        Returns the visit count for (url_bucket, dom_hash) after increment.
+        """
+        try:
+            bucket = self.url_bucket(url)
+            if bucket is None:
+                return 0
+            per_dom = self.dom_structure_counts.setdefault(bucket, {})
+            per_dom[dom_hash] = per_dom.get(dom_hash, 0) + 1
+            return per_dom[dom_hash]
+        except Exception as e:
+            logger.warning("DOM 구조 방문 기록 오류 (%s): %s", url, e)
+            return 0
+
+    def dom_visit_allows_processing(self, visit_count: int) -> bool:
+        """True if this visit is within max_same_structure for its DOM hash."""
+        if visit_count <= 0:
+            return True
+        return visit_count <= self.max_same_structure
+
     def should_crawl(self, url: str) -> bool:
-        """URL을 크롤링해야 하는지 결정 (구조, 확장자 등 일반 필터링)"""
+        """Static filters + structure quota check. Does not consume structure quota."""
         try:
             parsed = urlparse(url)
-            domain = parsed.netloc.lower()
             path = parsed.path.lower()
 
             if parsed.scheme not in self.allowed_schemes:
@@ -183,16 +267,7 @@ class URLFilter:
             if self._matches_excluded_pattern(url):
                 return False
 
-            if parsed.query:
-                query_keys = tuple(sorted(parse_qs(parsed.query).keys()))
-                structure_hash = hash((parsed.path, query_keys))
-
-                if self.url_structure_counts.get(structure_hash, 0) >= self.max_same_structure:
-                    logger.debug("동일 URL 구조 제한 초과 방지: %s", url)
-                    return False
-
-                self.url_structure_counts[structure_hash] = self.url_structure_counts.get(structure_hash, 0) + 1
-
+            # DOM structure limits are applied after FETCH+parse (see CrawlerEngine).
             return True
 
         except Exception as e:

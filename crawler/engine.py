@@ -6,9 +6,14 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from core.models import PageData, TokenDetector, CrawlStats
 from parsers.html_parser import AsyncHTMLParser
+from crawler.dom_skeleton import collect_form_actions, skeleton_hash
+from crawler.path_trace import CrawlPathTrace, build_crawl_path_log_filename
 from crawler.session_manager import SessionManager
 from crawler.url_filter import URLFilter
 from utils.logger import get_logger
+
+# Temporary: set prefix to None to disable crawl path txt export.
+CRAWL_PATH_LOG_PREFIX = "crawl_path_debug"
 
 logger = get_logger(__name__)
 
@@ -16,7 +21,7 @@ logger = get_logger(__name__)
 class CrawlConfig:
     """크롤링 설정 클래스"""
 
-    def __init__(self, max_depth=3, max_urls=100, delay=0.5, timeout=10, workers=5):
+    def __init__(self, max_depth=3, max_urls=250, delay=0.5, timeout=10, workers=5):
         self.max_depth = max_depth
         self.max_urls = max_urls
         self.delay = delay
@@ -41,6 +46,8 @@ class CrawlerEngine:
         # ✨ [수정] models.py의 통합 CrawlStats 사용
         self._stats = CrawlStats(start_time=datetime.now())
         self._shutdown = asyncio.Event()
+        self._path_trace: CrawlPathTrace | None = None
+        self.crawl_path_log_path: str | None = None
 
     def set_session(self, session_manager):
         self.session_manager = session_manager
@@ -62,9 +69,11 @@ class CrawlerEngine:
         logger.info("========== 크롤링 시작 ==========")
         logger.info("대상: %s", start_url)
 
-        self._reset_state()
+        self._reset_state(start_url)
         self._setup_domain_filter(start_url)
 
+        if self._path_trace:
+            await self._path_trace.log("SEED_ENQUEUE", url=start_url, depth=0)
         await self._queue.put((start_url, 0))
 
         async with self._session_context():
@@ -75,13 +84,27 @@ class CrawlerEngine:
         logger.info("[Engine] 파서 종료 신호(Sentinel) 전송 완료")
 
         self._stats.end_time = datetime.now()
+        if self._path_trace:
+            await self._path_trace.summary(
+                visited=len(self._visited),
+                queued_remaining=self._queue.qsize(),
+                stats=self._stats.to_dict(),
+            )
         self._log_summary()
         return self._stats
 
-    def _reset_state(self):
+    def _reset_state(self, start_url: str = "") -> None:
         self._visited.clear()
+        self.url_filter.reset_dom_structure_state()
         self._stats = CrawlStats(start_time=datetime.now())
         self._shutdown.clear()
+        self._queue = asyncio.Queue()
+        self._path_trace = None
+        self.crawl_path_log_path = None
+        if CRAWL_PATH_LOG_PREFIX and start_url:
+            self.crawl_path_log_path = build_crawl_path_log_filename(CRAWL_PATH_LOG_PREFIX)
+            self._path_trace = CrawlPathTrace(self.crawl_path_log_path)
+            self._path_trace.reset(start_url)
 
     def _setup_domain_filter(self, start_url):
         domain = urlparse(start_url).netloc
@@ -113,41 +136,121 @@ class CrawlerEngine:
                 url, depth = item
 
                 if not self._should_continue_crawling():
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "WORKER_STOP_MAX_URLS",
+                            url=url,
+                            depth=depth,
+                            worker_id=worker_id,
+                            detail=f"successful_requests={self._stats.successful_requests}",
+                        )
                     self._shutdown.set()
                     break
 
-                await self._process_url(url, depth)
+                if self._path_trace:
+                    await self._path_trace.log(
+                        "DEQUEUE",
+                        url=url,
+                        depth=depth,
+                        worker_id=worker_id,
+                        detail=f"queue_size={self._queue.qsize()}",
+                    )
+                await self._process_url(url, depth, worker_id=worker_id)
                 await asyncio.sleep(self.config.delay)
 
             except asyncio.TimeoutError:
-                if self._queue.empty(): break
+                if self._queue.empty():
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "WORKER_EXIT_QUEUE_EMPTY",
+                            worker_id=worker_id,
+                            detail=f"successful_requests={self._stats.successful_requests}",
+                        )
+                    break
             except Exception as e:
                 logger.error("워커 %d 오류: %s", worker_id, e)
 
     def _should_continue_crawling(self):
         return not self._shutdown.is_set() and self._stats.successful_requests < self.config.max_urls
 
-    async def _process_url(self, url, depth):
+    async def _process_url(self, url, depth, *, worker_id: int | None = None):
         url = self.url_filter.normalize_url(url)
-        if url in self._visited or not self.url_filter.should_crawl(url):
+        if url in self._visited:
+            if self._path_trace:
+                await self._path_trace.log(
+                    "SKIP_ALREADY_VISITED",
+                    url=url,
+                    depth=depth,
+                    worker_id=worker_id,
+                )
+            return
+        if not self.url_filter.should_crawl(url):
+            if self._path_trace:
+                await self._path_trace.log(
+                    "SKIP_FILTER",
+                    url=url,
+                    depth=depth,
+                    worker_id=worker_id,
+                )
             return
 
         self._visited.add(url)
         self._stats.total_requests += 1
         logger.debug("[%d] %s (depth=%d)", self._stats.total_requests, url, depth)
+        if self._path_trace:
+            await self._path_trace.log(
+                "FETCH",
+                url=url,
+                depth=depth,
+                worker_id=worker_id,
+            )
 
         try:
             response = await self.session_manager.get(url, timeout=self.config.timeout)
             if response:
-                if 200 <= response.get("status", 0) < 300:
-                    await self._process_response(response, url, depth)
+                status = int(response.get("status", 0) or 0)
+                if 200 <= status < 300:
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "FETCH_OK",
+                            url=url,
+                            depth=depth,
+                            worker_id=worker_id,
+                            detail=f"status={status}",
+                        )
+                    await self._process_response(
+                        response, url, depth, worker_id=worker_id
+                    )
                 else:
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "FETCH_HTTP_ERROR",
+                            url=url,
+                            depth=depth,
+                            worker_id=worker_id,
+                            detail=f"status={status}",
+                        )
                     self._stats.failed_requests += 1
-                    self._stats.record_status(response.get("status", 0))
+                    self._stats.record_status(status)
             else:
+                if self._path_trace:
+                    await self._path_trace.log(
+                        "FETCH_NO_RESPONSE",
+                        url=url,
+                        depth=depth,
+                        worker_id=worker_id,
+                    )
                 self._stats.failed_requests += 1
         except Exception as e:
             logger.error("처리 실패 (%s): %s", url, e)
+            if self._path_trace:
+                await self._path_trace.log(
+                    "FETCH_EXCEPTION",
+                    url=url,
+                    depth=depth,
+                    worker_id=worker_id,
+                    detail=str(e),
+                )
             self._stats.failed_requests += 1
             self._stats.record_error(type(e).__name__)
 
@@ -224,7 +327,7 @@ class CrawlerEngine:
 
         return info
 
-    async def _process_response(self, response, url, depth):
+    async def _process_response(self, response, url, depth, *, worker_id: int | None = None):
         html = response.get("text", "")
         final_url = str(response.get("url", url))
         headers = response.get("headers", {})
@@ -241,6 +344,14 @@ class CrawlerEngine:
 
         if not parse_result.get("success"):
             logger.warning("파싱 건너뜀 (%s): %s", final_url, parse_result.get("error"))
+            if self._path_trace:
+                await self._path_trace.log(
+                    "SKIP_PARSE_FAILED",
+                    url=final_url,
+                    depth=depth,
+                    worker_id=worker_id,
+                    detail=str(parse_result.get("error")),
+                )
             self._stats.failed_requests += 1
             return
 
@@ -248,6 +359,42 @@ class CrawlerEngine:
         if soup is None:
             return
 
+        dom_hash, form_actions = await asyncio.gather(
+            loop.run_in_executor(None, skeleton_hash, soup, final_url),
+            loop.run_in_executor(None, collect_form_actions, soup, final_url),
+        )
+        visit_count = self.url_filter.record_dom_visit(final_url, dom_hash)
+        novel_actions = self.url_filter.novel_form_actions(final_url, form_actions)
+        process_page = self.url_filter.page_allows_processing(
+            final_url, visit_count, form_actions
+        )
+        if self._path_trace:
+            novel_detail = ""
+            if novel_actions:
+                novel_detail = f" novel_actions={sorted(novel_actions)}"
+            await self._path_trace.log(
+                "DOM_STRUCTURE",
+                url=final_url,
+                depth=depth,
+                worker_id=worker_id,
+                detail=(
+                    f"hash={dom_hash} visit={visit_count} process={process_page}"
+                    f"{novel_detail}"
+                ),
+            )
+        if not process_page:
+            if self._path_trace:
+                await self._path_trace.log(
+                    "SKIP_DOM_STRUCTURE_LIMIT",
+                    url=final_url,
+                    depth=depth,
+                    worker_id=worker_id,
+                    detail=f"hash={dom_hash} max={self.url_filter.max_same_structure}",
+                )
+            self._stats.record_status(response.get("status", 0))
+            return
+
+        self.url_filter.mark_form_actions_processed(final_url, form_actions)
         self._stats.successful_requests += 1
         self._stats.record_status(response.get("status", 0))
 
@@ -305,8 +452,45 @@ class CrawlerEngine:
         # 5. 다음 크롤링 대상 URL 추가
         if depth < self.config.max_depth:
             for n_url in next_urls:
-                if self.url_filter.should_crawl(n_url) and n_url not in self._visited:
-                    await self._queue.put((n_url, depth + 1))
+                child_depth = depth + 1
+                normalized_child = self.url_filter.normalize_url(n_url)
+                if normalized_child in self._visited:
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "SKIP_ENQUEUE_VISITED",
+                            url=normalized_child,
+                            depth=child_depth,
+                            worker_id=worker_id,
+                            detail=f"from={final_url}",
+                        )
+                    continue
+                if not self.url_filter.should_crawl(n_url):
+                    if self._path_trace:
+                        await self._path_trace.log(
+                            "SKIP_ENQUEUE_FILTER",
+                            url=normalized_child,
+                            depth=child_depth,
+                            worker_id=worker_id,
+                            detail=f"from={final_url}",
+                        )
+                    continue
+                if self._path_trace:
+                    await self._path_trace.log(
+                        "ENQUEUE",
+                        url=normalized_child,
+                        depth=child_depth,
+                        worker_id=worker_id,
+                        detail=f"from={final_url}",
+                    )
+                await self._queue.put((n_url, child_depth))
+        elif self._path_trace and next_urls:
+            await self._path_trace.log(
+                "SKIP_ENQUEUE_MAX_DEPTH",
+                url=final_url,
+                depth=depth,
+                worker_id=worker_id,
+                detail=f"child_candidates={len(next_urls)}",
+            )
 
     def _log_summary(self):
         logger.info("========== 크롤링 종료 ==========")
