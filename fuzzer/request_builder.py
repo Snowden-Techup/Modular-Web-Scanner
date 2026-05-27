@@ -220,10 +220,11 @@ async def _send_prepared_request(
     method: str,
     url: str,
     request_kwargs: dict[str, Any],
+    allow_redirects: bool = True,
 ) -> FuzzerResponse:
     start_time = time.monotonic()
     try:
-        async with session.request(method, url, **request_kwargs) as response:
+        async with session.request(method, url, allow_redirects=allow_redirects, **request_kwargs) as response:
             text = await response.text(errors="replace")
             elapsed = time.monotonic() - start_time
             return FuzzerResponse(
@@ -316,6 +317,7 @@ async def build_and_send_request(
     surface: AttackSurface,
     parameter: str,
     payload: Any,
+    allow_redirects: bool = True
 ) -> FuzzerResponse:
     """
     Clone attack surface data, inject one payload, and send the HTTP request.
@@ -411,6 +413,7 @@ async def build_and_send_request(
             method=method,
             url=url,
             request_kwargs=request_kwargs,
+            allow_redirects=allow_redirects,
         )
 
     lock_key = _dynamic_lock_key(cookies)

@@ -22,6 +22,7 @@ class SQLiInternalPayload(Payload):
 class SQLiModule(BaseModule):
     def __init__(self, **kwargs):
         super().__init__("SQL Injection")
+        self.allow_redirects = False
         self.exploit_signatures = self._load_json("exploit_errors.json")
         self.syntax_signatures = self._load_json("syntax_errors.json")
         self.mismatch_signatures = self._load_json("mismatch_errors.json")
