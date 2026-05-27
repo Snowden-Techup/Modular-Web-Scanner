@@ -6,6 +6,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from core.models import PageData, TokenDetector, CrawlStats
 from parsers.html_parser import AsyncHTMLParser
+from crawler.dom_skeleton import collect_form_actions, skeleton_hash
 from crawler.session_manager import SessionManager
 from crawler.url_filter import URLFilter
 from utils.logger import get_logger
@@ -16,7 +17,7 @@ logger = get_logger(__name__)
 class CrawlConfig:
     """크롤링 설정 클래스"""
 
-    def __init__(self, max_depth=3, max_urls=100, delay=0.5, timeout=10, workers=5):
+    def __init__(self, max_depth=3, max_urls=250, delay=0.5, timeout=10, workers=5):
         self.max_depth = max_depth
         self.max_urls = max_urls
         self.delay = delay
@@ -38,7 +39,6 @@ class CrawlerEngine:
 
         self._visited = set()
         self._queue = asyncio.Queue()
-        # ✨ [수정] models.py의 통합 CrawlStats 사용
         self._stats = CrawlStats(start_time=datetime.now())
         self._shutdown = asyncio.Event()
 
@@ -64,13 +64,11 @@ class CrawlerEngine:
 
         self._reset_state()
         self._setup_domain_filter(start_url)
-
         await self._queue.put((start_url, 0))
 
         async with self._session_context():
             await self._run_workers()
 
-        # ✨ [핵심 수정] 모든 워커가 종료된 후, 파서 컨슈머에게 종료 신호 전송
         await self.queue_manager.add_page(None)
         logger.info("[Engine] 파서 종료 신호(Sentinel) 전송 완료")
 
@@ -78,10 +76,12 @@ class CrawlerEngine:
         self._log_summary()
         return self._stats
 
-    def _reset_state(self):
+    def _reset_state(self) -> None:
         self._visited.clear()
+        self.url_filter.reset_dom_structure_state()
         self._stats = CrawlStats(start_time=datetime.now())
         self._shutdown.clear()
+        self._queue = asyncio.Queue()
 
     def _setup_domain_filter(self, start_url):
         domain = urlparse(start_url).netloc
@@ -120,7 +120,8 @@ class CrawlerEngine:
                 await asyncio.sleep(self.config.delay)
 
             except asyncio.TimeoutError:
-                if self._queue.empty(): break
+                if self._queue.empty():
+                    break
             except Exception as e:
                 logger.error("워커 %d 오류: %s", worker_id, e)
 
@@ -129,7 +130,9 @@ class CrawlerEngine:
 
     async def _process_url(self, url, depth):
         url = self.url_filter.normalize_url(url)
-        if url in self._visited or not self.url_filter.should_crawl(url):
+        if url in self._visited:
+            return
+        if not self.url_filter.should_crawl(url):
             return
 
         self._visited.add(url)
@@ -139,11 +142,12 @@ class CrawlerEngine:
         try:
             response = await self.session_manager.get(url, timeout=self.config.timeout)
             if response:
-                if 200 <= response.get("status", 0) < 300:
+                status = int(response.get("status", 0) or 0)
+                if 200 <= status < 300:
                     await self._process_response(response, url, depth)
                 else:
                     self._stats.failed_requests += 1
-                    self._stats.record_status(response.get("status", 0))
+                    self._stats.record_status(status)
             else:
                 self._stats.failed_requests += 1
         except Exception as e:
@@ -158,7 +162,6 @@ class CrawlerEngine:
         server_header = headers_lower.get("server", "").lower()
         powered_by = headers_lower.get("x-powered-by", "").lower()
 
-        # 1. 웹 서버 추론 (헤더 기반)
         if "apache" in server_header:
             info["web_server"] = "Apache"
         elif "nginx" in server_header:
@@ -176,8 +179,6 @@ class CrawlerEngine:
         elif "werkzeug" in server_header or "gunicorn" in server_header:
             info["web_server"] = "Gunicorn/Werkzeug"
 
-        # 2. 개발 언어 추론 (교차 검증: A. 헤더 -> B. 쿠키 -> C. URL)
-        # A. 헤더 확인
         if "php" in powered_by or "php" in server_header:
             info["language"] = "PHP"
         elif "asp.net" in powered_by or "iis" in server_header:
@@ -191,7 +192,6 @@ class CrawlerEngine:
         elif "ruby" in powered_by or "passenger" in server_header:
             info["language"] = "Ruby"
 
-        # B. 쿠키 확인 (헤더에서 못 찾았을 경우)
         if info["language"] == "Unknown":
             if "PHPSESSID" in cookies:
                 info["language"] = "PHP"
@@ -199,14 +199,13 @@ class CrawlerEngine:
                 info["language"] = "ASP.NET"
             elif "JSESSIONID" in cookies:
                 info["language"] = "Java"
-            elif "connect.sid" in cookies:  # Express.js 기본 세션
+            elif "connect.sid" in cookies:
                 info["language"] = "Node.js"
-            elif "_session_id" in cookies:  # Ruby on Rails 기본 세션
+            elif "_session_id" in cookies:
                 info["language"] = "Ruby"
-            elif "CFID" in cookies or "CFTOKEN" in cookies:  # Adobe ColdFusion
+            elif "CFID" in cookies or "CFTOKEN" in cookies:
                 info["language"] = "ColdFusion"
 
-        # C. URL 확장자 확인 (쿠키로도 못 찾았을 경우)
         url_lower = url.lower()
         if info["language"] == "Unknown":
             if ".php" in url_lower:
@@ -230,7 +229,6 @@ class CrawlerEngine:
         headers = response.get("headers", {})
         cookies = self.session_manager.get_cookies()
 
-        #  서버 환경 탐지 실행 (헤더, 쿠키, URL 모두 전달)
         server_info = self._fingerprint_server(headers, cookies, final_url)
 
         loop = asyncio.get_running_loop()
@@ -248,39 +246,49 @@ class CrawlerEngine:
         if soup is None:
             return
 
+        dom_hash, form_actions = await asyncio.gather(
+            loop.run_in_executor(None, skeleton_hash, soup, final_url),
+            loop.run_in_executor(None, collect_form_actions, soup, final_url),
+        )
+        visit_count = self.url_filter.record_dom_visit(final_url, dom_hash)
+        process_page = self.url_filter.page_allows_processing(
+            final_url, visit_count, form_actions
+        )
+        if not process_page:
+            self._stats.record_status(response.get("status", 0))
+            return
+
+        self.url_filter.mark_form_actions_processed(final_url, form_actions)
         self._stats.successful_requests += 1
         self._stats.record_status(response.get("status", 0))
 
-        # 🚀 PageData 생성 시 server_info 전달
         page = PageData(
             url=final_url,
             html=html,
             depth=depth,
             headers=headers,
             cookies=cookies,
-            server_info=server_info,  # 추가된 부분
+            server_info=server_info,
             soup=soup
         )
 
-        # ✨ 무거운 DOM 순회 로직을 스레드 풀로 위임하기 위한 내부 함수
         def _extract_data_sync(soup_obj, base_url):
             tokens = {}
             next_urls = set()
             forms_found = 0
             links_found = 0
 
-            # 폼 & 동적 토큰 추출
             for form in soup_obj.find_all("form"):
                 forms_found += 1
                 for input_field in form.find_all(["input", "textarea", "select"]):
                     name = input_field.get("name", "").strip()
-                    if not name: continue
+                    if not name:
+                        continue
                     value = input_field.get("value", "")
                     input_type = input_field.get("type", "text")
                     if TokenDetector.detect(name, value, input_type):
                         tokens[name] = value
 
-            # 다음 크롤링 대상 URL 추출
             for a in soup_obj.find_all("a", href=True):
                 links_found += 1
                 next_urls.add(urljoin(base_url, a['href']))
@@ -289,24 +297,25 @@ class CrawlerEngine:
 
             return tokens, next_urls, forms_found, links_found
 
-        # ✨ 스레드 풀에서 DOM 순회 작업을 실행하여 메인 루프 블로킹 방지
         tokens, next_urls, forms_cnt, links_cnt = await loop.run_in_executor(
             None, _extract_data_sync, soup, final_url
         )
 
-        # 3. 추출된 통계 업데이트 및 토큰 병합
         self._stats.total_forms_found += forms_cnt
         self._stats.total_links_found += links_cnt
         page.dynamic_tokens.update(tokens)
 
-        # 4. 비동기 큐 매니저로 전달
         await self.queue_manager.add_page(page)
 
-        # 5. 다음 크롤링 대상 URL 추가
         if depth < self.config.max_depth:
             for n_url in next_urls:
-                if self.url_filter.should_crawl(n_url) and n_url not in self._visited:
-                    await self._queue.put((n_url, depth + 1))
+                child_depth = depth + 1
+                normalized_child = self.url_filter.normalize_url(n_url)
+                if normalized_child in self._visited:
+                    continue
+                if not self.url_filter.should_crawl(n_url):
+                    continue
+                await self._queue.put((n_url, child_depth))
 
     def _log_summary(self):
         logger.info("========== 크롤링 종료 ==========")
