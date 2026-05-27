@@ -9,6 +9,8 @@ from modules.osci.module import OSCiModule
 from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
+from modules.oob.client import DEFAULT_OAST_SERVER_URL, OASTClient, normalize_oast_server_url
+from modules.oob.module import OOBModule
 
 def select_modules(args) -> list:
     selected = []
@@ -79,7 +81,18 @@ def select_modules(args) -> list:
             ReflectedXSSModule(
                 evasion_level=args.rxss_evasion_level
             )
-        )    
+        )
+
+    if args.type == "oob":
+        oast_server = normalize_oast_server_url(getattr(args, "oob_server", "") or "")
+        oast_client = OASTClient(
+            oast_server,
+            poll_retries=getattr(args, "oob_retries", 3),
+            poll_delay=getattr(args, "oob_poll_delay", 5.0),
+            poll_timeout=getattr(args, "oob_poll_timeout", 10.0),
+        )
+        selected.append(OOBModule(oast_client=oast_client))
+        print(f"[*] OAST server: {oast_server}")
 
     return selected
 

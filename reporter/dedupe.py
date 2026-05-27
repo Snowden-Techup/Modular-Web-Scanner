@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from modules.ssrf.module import SSRF_MODULE_REPORT_NAME
+from modules.oob.module import OOB_MODULE_REPORT_NAME
 
 _SSRF_INTERNAL_CLASS = "SSRF-Internal"
 _SSRF_OOB_CLASS = "SSRF-OOB"
+_OOB_CLASS = "OOB-Callback"
 _BRUTEFORCE_CLASS = "Bruteforce"
 _STORED_XSS_CLASS = "stored_xss"
 _REFLECTED_XSS_CLASS = "Reflected XSS"
@@ -90,6 +92,10 @@ def _is_ssrf_record(record: dict[str, Any]) -> bool:
     return _module_name(record) == SSRF_MODULE_REPORT_NAME
 
 
+def _is_oob_module_record(record: dict[str, Any]) -> bool:
+    return _module_name(record) == OOB_MODULE_REPORT_NAME
+
+
 def _is_oob_ssrf_record(record: dict[str, Any]) -> bool:
     return record.get("ssrf_channel") == "oob"
 
@@ -147,6 +153,9 @@ def report_attack_type(record: dict[str, Any]) -> str:
     module = _module_name(record)
     raw_type = _raw_attack_type(record)
     base_type = canonical_attack_type_for_grouping(raw_type)
+
+    if _is_oob_module_record(record):
+        return _OOB_CLASS
 
     if _is_ssrf_record(record):
         return _ssrf_report_type(record)
@@ -359,6 +368,19 @@ _BRUTEFORCE_GUIDE = (
     "로그 흐름을 모니터링하여 이상 감지 시 멀티 팩터 인증(MFA) 또는 CAPTCHA 시스템을 트리거해야 합니다."
 )
 
+_OOB_GUIDE = (
+    "아웃바운드 HTTP/DNS 요청이 외부 서버에서 확인된 경우, 서버 측 코드가 사용자 입력값을 "
+    "검증 없이 네트워크 요청의 목적지로 사용하고 있음을 의미합니다. "
+    "요청 대상 URL/호스트를 엄격한 화이트리스트 기반으로 검증하고, DNS Resolution 후 "
+    "반환된 IP 주소가 사설망(RFC 1918) 및 링크 로컬 대역에 속하는지 이중 확인하십시오. "
+    "OS 커맨드 인젝션이 원인인 경우, 외부 인자를 셸 명령에 직접 전달하는 구조를 제거하고 "
+    "언어 내장 API로 교체한 뒤 화이트리스트 입력 정제를 적용해야 합니다."
+)
+_OOB_REF = (
+    "OWASP Top 10:2021 A10:Server-Side Request Forgery / CWE-918 "
+    "(보조 매핑: CWE-78 OS Command Injection)"
+)
+
 _SQLI_REF = "OWASP Top 10:2021 A03:Injection / CWE-89"
 _OSCI_REF = "OWASP Top 10:2021 A03:Injection / CWE-78"
 _LFI_REF = "OWASP Top 10:2021 A01:Broken Access Control / CWE-22"
@@ -368,6 +390,12 @@ _XSS_REF = "OWASP Top 10:2021 A03:Injection / CWE-79"
 _BRUTEFORCE_REF = "OWASP Top 10:2021 A07:Identification and Authentication Failures / CWE-307"
 
 SECURE_CODING_DB: dict[str, dict[str, str]] = {
+    "OOB-Callback": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
+    "OOB-SSRF": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
+    "OOB-OSCI-curl": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
+    "OOB-OSCI-wget": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
+    "OOB-OSCI-win-curl": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
+    "OOB-Generic": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
     "SQLi": {"reference": _SQLI_REF, "secure_coding_guide": _SQLI_GUIDE},
     "SQLi-error_based": {"reference": _SQLI_REF, "secure_coding_guide": _SQLI_GUIDE},
     "SQLi-boolean_blind": {"reference": _SQLI_REF, "secure_coding_guide": _SQLI_GUIDE},

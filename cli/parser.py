@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--type",
         type=str,
         default="all",
-        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "all"],
+        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "oob", "all"],
         help=(
             "Attack category (default: all). For bruteforce without --bf-target-url, "
             "surfaces come from the crawler; BruteforceModule.get_target_parameters filters targets."
@@ -345,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude-urls",
         nargs="+",
         default=[],
-        help="크롤링 및 공격에서 제외할 URL 정규식 패턴 목록(예: '/setup\.php' '/admin/.*')"
+        help=r"크롤링 및 공격에서 제외할 URL 정규식 패턴 목록(예: '/setup\.php' '/admin/.*')"
     )
     parser.add_argument(
         "--rxss-evasion-level",
@@ -353,6 +353,42 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[0, 1, 2, 3],
         default=1,
         help="reflected_XSS payload mutation level (0=off/raw, 1=basic WAF bypass, 2=advanced/encoding, 3=obfuscation)"
+    )
+
+    # ── OOB / OAST 옵션 ──────────────────────────────────────────────────────
+    parser.add_argument(
+        "--oob-server",
+        type=str,
+        default="http://3.34.47.231",
+        metavar="URL",
+        help=(
+            "외부 OAST 서버 기본 URL (기본: http://3.34.47.231). "
+            "--type oob 사용 시 콜백 수신·폴링에 사용."
+        ),
+    )
+    parser.add_argument(
+        "--oob-retries",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "OOB 콜백 폴링 최대 시도 횟수 (기본: 3). "
+            "폴링 스케줄: delay×1, delay×2, ..., delay×N"
+        ),
+    )
+    parser.add_argument(
+        "--oob-poll-delay",
+        type=float,
+        default=5.0,
+        metavar="SEC",
+        help="OOB 폴링 기본 대기 시간(초). 선형 증가 적용 (기본: 5.0)",
+    )
+    parser.add_argument(
+        "--oob-poll-timeout",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="OAST API 단일 HTTP 요청 타임아웃(초) (기본: 10.0)",
     )
     return parser
 

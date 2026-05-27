@@ -20,6 +20,7 @@ from cli.surfaces import resolve_surfaces
 from fuzzer import FuzzerEngine
 from fuzzer.request_builder import build_and_send_request
 from reporter import ReportGenerator
+from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
 from reporter.generator import _finding_sort_key
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -35,6 +36,7 @@ SCAN_TYPES = [
     "ssrf",
     "stored_xss",
     "reflected_xss",
+    "oob",
 ]
 
 # Web UI: true-random bruteforce는 total_requests 대비 진행률이 오래 안 바뀌는 경우가 있어
@@ -109,6 +111,16 @@ class ReflectedXSSOptions(BaseModel):
     evasion_level: int = Field(default=1, ge=0, le=3)
 
 
+class OOBOptions(BaseModel):
+    oob_server: str = Field(
+        default=DEFAULT_OAST_SERVER_URL,
+        description="Standalone OAST server base URL",
+    )
+    oob_retries: int = Field(default=3, ge=1, le=20)
+    oob_poll_delay: float = Field(default=5.0, ge=1.0, le=120.0)
+    oob_poll_timeout: float = Field(default=10.0, ge=1.0, le=60.0)
+
+
 class ScanRequest(BaseModel):
     target_url: str = Field(..., min_length=1, max_length=2048, alias="url")
     scan_type: Literal[
@@ -121,6 +133,7 @@ class ScanRequest(BaseModel):
         "ssrf",
         "stored_xss",
         "reflected_xss",
+        "oob",
     ] = "all"
     level: int = Field(default=1, ge=0, le=3)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -131,6 +144,7 @@ class ScanRequest(BaseModel):
     ssrf: SSRFOptions = Field(default_factory=SSRFOptions)
     stored_xss: StoredXSSOptions = Field(default_factory=StoredXSSOptions)
     reflected_xss: ReflectedXSSOptions = Field(default_factory=ReflectedXSSOptions)
+    oob: OOBOptions = Field(default_factory=OOBOptions)
 
     model_config = {"populate_by_name": True}
 
@@ -169,6 +183,10 @@ async def get_schema() -> dict:
             "sxss_max_risk_level": "Critical",
             "osci_evasion_level": 1,
             "rxss_evasion_level": 1,
+            "oob_server": DEFAULT_OAST_SERVER_URL,
+            "oob_retries": 3,
+            "oob_poll_delay": 5.0,
+            "oob_poll_timeout": 10.0,
         },
     }
 
@@ -288,6 +306,11 @@ def _build_cli_args(req: ScanRequest) -> Namespace:
         sxss_categories=list(req.stored_xss.categories),
         sxss_target_params=list(req.stored_xss.target_params),
         rxss_evasion_level=rxss_evasion_level,
+        # OOB / OAST (standalone callback detection)
+        oob_server=normalize_oast_server_url(req.oob.oob_server),
+        oob_retries=req.oob.oob_retries,
+        oob_poll_delay=req.oob.oob_poll_delay,
+        oob_poll_timeout=req.oob.oob_poll_timeout,
     )
 
 
@@ -332,6 +355,8 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
 
     try:
         args = _build_cli_args(req)
+        if args.type == "oob":
+            _scan_log(scan, f"OAST 서버: {args.oob_server}")
         _scan_log(scan, "CLI 인자 구성 완료")
         cookies = parse_cookies(args.cookie) if args.cookie else {}
         _scan_log(scan, "공격면 수집 시작")
