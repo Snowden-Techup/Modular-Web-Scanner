@@ -7,7 +7,7 @@ from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Iterable, Protocol
 
 import aiohttp
-from fuzzer.request_builder import send_baseline_request
+from fuzzer.request_builder import send_baseline_request, FuzzerResponse
 
 try:
     from core.models import AttackSurface  # type: ignore
@@ -74,8 +74,7 @@ class AttackModule(Protocol):
         elapsed_time: float,
         original_res: Any | None = None,
         requester: Callable[[str], Awaitable[Any]] | None = None,
-    ) -> tuple[bool, list[str], Any] | Awaitable[tuple[bool, list[str], Any]]: ...
-    #또는) -> bool | Awaitable[bool]: 
+    ) -> tuple[bool, list[str], Any] | Awaitable[tuple[bool, list[str], Any]] | bool | Awaitable[bool]: ...
 
 
 class FuzzerEngine:
@@ -490,24 +489,39 @@ class FuzzerEngine:
                 return
 
             response: Any
-            try:
-                async with self._semaphore:
-                    response = await request_sender(
-                        session=session,
-                        surface=surface,
-                        parameter=parameter,
-                        payload=payload,
-                        allow_redirects=allow_redir,
-                    )
-            except Exception as exc:
-                async with self._stats_lock:
-                    self._stats.failures += 1
-                print(f"[worker:{worker_id}][{module.name}] request failed: {exc}")
-                return
+            
+            payload_value = str(getattr(payload, "value", payload))
+            is_serial = getattr(payload, "_is_serial", False)
 
-            if self.delay > 0:
-                # Sleep outside semaphore so slots are not blocked by throttle waits.
-                await asyncio.sleep(self.delay)
+            if payload_value == "1" and is_serial:
+                # 더미 요청 발송을 생략하고 비어있는 FuzzerResponse 객체 생성
+                response = FuzzerResponse(
+                    status=0,
+                    text="",
+                    headers={},
+                    elapsed_time=0.0,
+                    url=surface.url,
+                    error="Skipped dummy request"
+                )
+            else:
+                try:
+                    async with self._semaphore:
+                        response = await request_sender(
+                            session=session,
+                            surface=surface,
+                            parameter=parameter,
+                            payload=payload,
+                            allow_redirects=allow_redir,
+                        )
+                except Exception as exc:
+                    async with self._stats_lock:
+                        self._stats.failures += 1
+                    print(f"[worker:{worker_id}][{module.name}] request failed: {exc}")
+                    return
+
+                if self.delay > 0:
+                    # Sleep outside semaphore so slots are not blocked by throttle waits.
+                    await asyncio.sleep(self.delay)
 
             elapsed_time = float(
                 getattr(response, "elapsed_time", getattr(response, "elapsed", 0.0))
