@@ -22,7 +22,6 @@ class SQLiInternalPayload(Payload):
 class SQLiModule(BaseModule):
     def __init__(self, **kwargs):
         super().__init__("SQL Injection")
-        self.allow_redirects = False
         self.exploit_signatures = self._load_json("exploit_errors.json")
         self.syntax_signatures = self._load_json("syntax_errors.json")
         self.mismatch_signatures = self._load_json("mismatch_errors.json")
@@ -201,12 +200,10 @@ class SQLiModule(BaseModule):
                             # 30초(10초 * 3) 동안 일반 페이로드 완료 없으면 강제 돌파
                             if stuck_count >= 3:
                                 if not self._time_phase_active:
-                                    print(f"\n[!] Deadlock Breaker: Network drop-offs detected. Forcing time-based phase (SQLi).")
                                 self._barrier_event.set()
                                 break
                     
                 if not self._time_phase_active:
-                    print(f"\n[★TRANSITION] Barrier cleared. Starting REAL time-based SQLi attacks!")
                     self._time_phase_active = True
 
                 # 2. 전역 직렬 실행 락
@@ -250,7 +247,6 @@ class SQLiModule(BaseModule):
                     self._time_attack_in_flight -= 1
                     if self._time_attack_in_flight == 0:
                         if self._time_phase_active:
-                            print(f"[★TRANSITION] Going back to normal SQLi payloads")
                             self._barrier_event.clear()
                             self._time_phase_active = False
 
