@@ -32,7 +32,8 @@ class OSCiModule(BaseModule):
             self.target_os = "all"
         else:
             self.target_os = "Unix"
-        
+            
+        self.allow_redirects = False
         self.evasion_level = kwargs.get('evasion_level', 0)
         self.include_time_based = kwargs.get('include_time_based', False)
         self.max_time_payloads = kwargs.get('max_time_payloads', 0)

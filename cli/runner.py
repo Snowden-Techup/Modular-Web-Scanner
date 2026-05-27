@@ -104,5 +104,5 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
     reporter.export_to_json(args.output)
 
 
-async def _request_sender(session, surface, parameter, payload):
-    return await build_and_send_request(session, surface, parameter, payload)
+async def _request_sender(session, surface, parameter, payload, allow_redirects=True):
+    return await build_and_send_request(session, surface, parameter, payload, allow_redirects=allow_redirects)

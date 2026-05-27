@@ -54,6 +54,7 @@ class AsyncRequestSender(Protocol):
         surface: AttackSurface,
         parameter: str,
         payload: Any,
+        allow_redirects: bool = True,
     ) -> Any: ...
 
 
@@ -483,6 +484,7 @@ class FuzzerEngine:
         on_finding: ResultCallback | None,
     ) -> None:
         stop_event = self._module_stop_events.get(module.name)
+        allow_redir = getattr(module, "allow_redirects", True)
         try:
             if stop_event is not None and stop_event.is_set():
                 return
@@ -495,6 +497,7 @@ class FuzzerEngine:
                         surface=surface,
                         parameter=parameter,
                         payload=payload,
+                        allow_redirects=allow_redir,
                     )
             except Exception as exc:
                 async with self._stats_lock:
@@ -518,6 +521,7 @@ class FuzzerEngine:
                         surface=surface,
                         parameter=parameter,
                         payload=mutated_payload,
+                        allow_redirects=allow_redir,
                     )
 
             verdict = module.analyze(
