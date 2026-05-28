@@ -200,7 +200,7 @@ class SQLiModule(BaseModule):
                             # 30초(10초 * 3) 동안 일반 페이로드 완료 없으면 강제 돌파
                             if stuck_count >= 3:
                                 if not self._time_phase_active:
-                                self._barrier_event.set()
+                                    self._barrier_event.set()
                                 break
                     
                 if not self._time_phase_active:
