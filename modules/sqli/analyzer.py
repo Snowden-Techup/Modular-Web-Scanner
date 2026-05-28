@@ -116,6 +116,7 @@ async def verify_sqli_logic(response, payload, original_res, requester, is_vuln_
 
     val = payload.value
     res_text = response.text
+    true_status = getattr(response, "status", getattr(response, "status_code", 0)) or 0
     
     # 1. 확정 증거
     if is_vuln_1st and any(tag in str(evidences) for tag in ["[Error]", "[Time]"]):
@@ -148,6 +149,7 @@ async def verify_sqli_logic(response, payload, original_res, requester, is_vuln_
             
         try:
             false_res = await requester(false_payload)
+            false_status = getattr(false_res, "status", getattr(false_res, "status_code", 0)) or 0
             
             scrubbed_true = _remove_direct_reflection(res_text, val)
             scrubbed_false = _remove_direct_reflection(false_res.text, false_payload)
@@ -160,40 +162,70 @@ async def verify_sqli_logic(response, payload, original_res, requester, is_vuln_
             
             t_f_ratio = get_text_ratio(scrubbed_true, scrubbed_false)
             
-            # 일치도가 0에 수렴할 경우 재검증
-            if t_f_ratio <= 0.05:
-                await asyncio.sleep(3.0) # 3초 대기
+            # 일치도가 0.05 이하이거나, T 또는 F 중 하나라도 상태 코드가 0일 때 재검증
+            if t_f_ratio <= 0.05 or true_status == 0 or false_status == 0:
+                vuln_count = 0
+                valid_ratios = []
+                valid_false_texts = []
+                valid_statuses = []
                 
-                retry_true_res = await requester(val)
-                retry_false_res = await requester(false_payload)
-                
-                retry_scrubbed_true = _remove_direct_reflection(retry_true_res.text, val)
-                retry_scrubbed_false = _remove_direct_reflection(retry_false_res.text, false_payload)
-                
-                if true_logic and false_logic:
-                    for t_var in filter(None, set([true_logic, unquote(true_logic), html.escape(true_logic)])):
-                        retry_scrubbed_true = retry_scrubbed_true.replace(t_var, "[LOGIC_NORMALIZED]")
-                    for f_var in filter(None, set([false_logic, unquote(false_logic), html.escape(false_logic)])):
-                        retry_scrubbed_false = retry_scrubbed_false.replace(f_var, "[LOGIC_NORMALIZED]")
+                for _ in range(3):
+                    await asyncio.sleep(2.0)
+                    try:
+                        retry_t_res = await requester(val)
+                        retry_f_res = await requester(false_payload)
                         
-                retry_t_f_ratio = get_text_ratio(retry_scrubbed_true, retry_scrubbed_false)
+                        r_t_status = getattr(retry_t_res, "status", getattr(retry_t_res, "status_code", 0)) or 0
+                        r_f_status = getattr(retry_f_res, "status", getattr(retry_f_res, "status_code", 0)) or 0
+                        
+                        if r_t_status == 0 or r_f_status == 0:
+                            continue
+                        
+                        r_scrubbed_true = _remove_direct_reflection(retry_t_res.text, val)
+                        r_scrubbed_false = _remove_direct_reflection(retry_f_res.text, false_payload)
+                        
+                        if true_logic and false_logic:
+                            for t_var in filter(None, set([true_logic, unquote(true_logic), html.escape(true_logic)])):
+                                r_scrubbed_true = r_scrubbed_true.replace(t_var, "[LOGIC_NORMALIZED]")
+                            for f_var in filter(None, set([false_logic, unquote(false_logic), html.escape(false_logic)])):
+                                r_scrubbed_false = r_scrubbed_false.replace(f_var, "[LOGIC_NORMALIZED]")
+                                
+                        r_t_f_ratio = get_text_ratio(r_scrubbed_true, r_scrubbed_false)
+                        
+                        if r_t_f_ratio < 0.98 or r_t_status != r_f_status:
+                            vuln_count += 1
+                            valid_ratios.append(r_t_f_ratio)
+                            valid_false_texts.append(r_scrubbed_false)
+                            valid_statuses.append((r_t_status, r_f_status))
+                            
+                    except Exception:
+                        pass
                 
-                # 재검증에서 두 응답이 같으면 오탐으로 간주
-                if retry_t_f_ratio >= 0.98:
-                    return False, evidences
+                # 3번 중 두 번 이상 검증 됐을 때만 확정
+                if vuln_count >= 2:
+                    avg_ratio = sum(valid_ratios) / len(valid_ratios)
+                    pure_false = _get_pure_text(valid_false_texts[-1])
+                    t_stat, f_stat = valid_statuses[-1]
+                    status_info = f" (Status: {t_stat} vs {f_stat})" if t_stat != f_stat else ""
                     
-                t_f_ratio = retry_t_f_ratio
-                false_res = retry_false_res
-                scrubbed_false = retry_scrubbed_false
+                    if GENERIC_DB_ERROR_KEYWORDS.search(pure_false):
+                        evidences.append(f"[Verified] Conditional Error SQLi (Recovered from drop). T!=F avg ratio: {avg_ratio:.4f}{status_info}")
+                    else:
+                        evidences.append(f"[Verified] Boolean SQLi (Recovered from drop). T!=F avg ratio: {avg_ratio:.4f}{status_info}")
+                    return True, evidences
+                else:
+                    return False, evidences
 
-            #  일치도가 98미만이면 정탐으로 확정
-            if t_f_ratio < 0.98:
+            if t_f_ratio < 0.98 or true_status != false_status:
                 pure_false = _get_pure_text(scrubbed_false)
+                status_info = f" (Status: {true_status} vs {false_status})" if true_status != false_status else ""
                 
                 if GENERIC_DB_ERROR_KEYWORDS.search(pure_false):
-                    evidences.append(f"[Verified] Conditional Error SQLi. T!=F ratio: {t_f_ratio:.4f}")
+                    evidences.append(f"[Verified] Conditional Error SQLi. T!=F ratio: {t_f_ratio:.4f}{status_info}")
+                elif true_status != false_status and t_f_ratio >= 0.98:
+                    evidences.append(f"[Verified] Status-based Blind SQLi. T!=F ratio: {t_f_ratio:.4f}{status_info}")
                 else:
-                    evidences.append(f"[Verified] Boolean SQLi. T!=F ratio: {t_f_ratio:.4f}")
+                    evidences.append(f"[Verified] Boolean SQLi. T!=F ratio: {t_f_ratio:.4f}{status_info}")
                     
                 return True, evidences
                 
