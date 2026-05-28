@@ -1,76 +1,84 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: scanner_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  db:
+    image: postgres:15-alpine
+    container_name: scanner_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: scanner_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d scanner_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
   web:
-    # Replace Dockerfile/command to match your web entrypoint.
-    build:
-      context: .
-    container_name: waf-fuzzer-web
+    build: .
+    container_name: scanner_web
     command: uvicorn webapp.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://admin:adminpassword@db:5432/scanner_db
     ports:
       - "8000:8000"
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://waf:waf@db:5432/waf
     depends_on:
       redis:
         condition: service_healthy
       db:
         condition: service_healthy
-    restart: unless-stopped
+    restart: always
 
   celery_worker:
-    # Replace Dockerfile/command to match your worker entrypoint.
-    build:
-      context: .
-    container_name: waf-fuzzer-worker
-    command: celery -A core.tasks worker --loglevel=INFO --concurrency=4
+    build: .
+    container_name: scanner_worker
+    # TODO: Replace with your actual Celery app path.
+    command: celery -A webapp.main.celery_app worker --concurrency=4 --loglevel=info
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://waf:waf@db:5432/waf
+      DATABASE_URL: postgresql://admin:adminpassword@db:5432/scanner_db
     depends_on:
       redis:
         condition: service_healthy
       db:
         condition: service_healthy
-    restart: unless-stopped
-    # Compose(v2) compatibility limits
+      web:
+        condition: service_started
+    restart: always
     cpus: "1.0"
     mem_limit: 3g
-    # Swarm-style limits (kept for portability)
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: 3G
 
-  redis:
-    image: redis:7-alpine
-    container_name: waf-fuzzer-redis
-    command: redis-server --appendonly yes
+  nginx:
+    image: nginx:alpine
+    container_name: scanner_nginx
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
-
-  db:
-    image: postgres:16-alpine
-    container_name: waf-fuzzer-db
-    environment:
-      POSTGRES_USER: waf
-      POSTGRES_PASSWORD: waf
-      POSTGRES_DB: waf
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U waf -d waf"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web:
+        condition: service_started
+    restart: always
 
 volumes:
-  redis_data:
   postgres_data:

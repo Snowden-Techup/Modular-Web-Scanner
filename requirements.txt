@@ -1,0 +1,9 @@
+aiohttp
+beautifulsoup4
+celery
+fastapi
+pydantic
+psycopg[binary]
+redis
+typing_extensions
+uvicorn[standard]
