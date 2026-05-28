@@ -2,17 +2,23 @@ from __future__ import annotations
 
 from argparse import Namespace
 import asyncio
+import hashlib
 import json
+import os
+import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import Depends, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import jwt
 
 from cli.options import parse_bf_length, parse_cookies
 from cli.runner import prepare_scan_context
@@ -25,6 +31,10 @@ from reporter.generator import _finding_sort_key
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRES_MINUTES = int(os.getenv("JWT_EXPIRES_MINUTES", "1440"))
 
 SCAN_TYPES = [
     "all",
@@ -149,6 +159,16 @@ class ScanRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
 app = FastAPI(
     title="Modular Web Scanner API",
     description="Web UI backend connected to the real CLI scan pipeline.",
@@ -164,6 +184,123 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 scans_db: dict[str, dict] = {}
+users_db: dict[int, dict] = {}
+users_by_name: dict[str, int] = {}
+_next_user_id = 1
+
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def _create_access_token(user_id: int, username: str) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRES_MINUTES)
+    payload = {
+        "sub": str(user_id),
+        "username": username,
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def _parse_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header is required.",
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Use Authorization: Bearer <token>.",
+        )
+    return token
+
+
+def _get_current_user(authorization: str | None = Header(default=None)) -> dict:
+    token = _parse_bearer_token(authorization)
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+        ) from exc
+
+    raw_user_id = payload.get("sub")
+    try:
+        user_id = int(raw_user_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token subject.",
+        ) from exc
+
+    user = users_db.get(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found.",
+        )
+    return user
+
+
+def _require_scan_owner(scan: dict, user: dict) -> None:
+    if scan.get("owner_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Scan ID not found")
+
+
+@app.post("/api/auth/register")
+async def register_user(req: RegisterRequest) -> dict:
+    global _next_user_id
+    normalized_username = req.username.strip().lower()
+    if not normalized_username:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    if normalized_username in users_by_name:
+        raise HTTPException(status_code=409, detail="Username already exists.")
+
+    salt = secrets.token_hex(16)
+    user = {
+        "id": _next_user_id,
+        "username": normalized_username,
+        "salt": salt,
+        "password_hash": _hash_password(req.password, salt),
+        "created_at": time.time(),
+    }
+    users_db[_next_user_id] = user
+    users_by_name[normalized_username] = _next_user_id
+    _next_user_id += 1
+    return {"status": "created", "user_id": user["id"], "username": user["username"]}
+
+
+@app.post("/api/auth/login")
+async def login_user(req: LoginRequest) -> dict:
+    normalized_username = req.username.strip().lower()
+    user_id = users_by_name.get(normalized_username)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    user = users_db[user_id]
+    expected_hash = _hash_password(req.password, user["salt"])
+    if expected_hash != user["password_hash"]:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    token = _create_access_token(user["id"], user["username"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user["id"], "username": user["username"]},
+        "expires_in_minutes": JWT_EXPIRES_MINUTES,
+    }
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: dict = Depends(_get_current_user)) -> dict:
+    return {
+        "id": current_user["id"],
+        "username": current_user["username"],
+        "created_at": current_user["created_at"],
+    }
 
 
 @app.get("/api/schema")
@@ -192,11 +329,16 @@ async def get_schema() -> dict:
 
 
 @app.post("/api/scan/start")
-async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks) -> dict:
+async def start_scan(
+    req: ScanRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
     scan_id = str(uuid4())
     now = time.time()
     scans_db[scan_id] = {
         "scan_id": scan_id,
+        "owner_id": current_user["id"],
         "status": "queued",
         "progress": 0,
         "progress_percent": 0.0,
@@ -228,11 +370,19 @@ async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks) -> dic
 
 
 @app.get("/api/scan/{scan_id}")
-async def get_scan(scan_id: str) -> dict:
+async def get_scan(scan_id: str, current_user: dict = Depends(_get_current_user)) -> dict:
     scan = scans_db.get(scan_id)
     if scan is None:
         raise HTTPException(status_code=404, detail="Scan ID not found")
+    _require_scan_owner(scan, current_user)
     return scan
+
+
+@app.get("/api/scans")
+async def get_my_scans(current_user: dict = Depends(_get_current_user)) -> dict:
+    rows = [scan for scan in scans_db.values() if scan.get("owner_id") == current_user["id"]]
+    rows.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return {"items": rows, "count": len(rows)}
 
 
 def _build_cli_args(req: ScanRequest) -> Namespace:
