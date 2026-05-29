@@ -33,7 +33,7 @@ services:
     command: uvicorn webapp.main:app --host 0.0.0.0 --port 8000
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://admin:adminpassword@db:5432/scanner_db
+      DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
     ports:
       - "8000:8000"
     depends_on:
@@ -50,7 +50,7 @@ services:
     command: celery -A webapp.main.celery_app worker --concurrency=4 --loglevel=info
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://admin:adminpassword@db:5432/scanner_db
+      DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
     depends_on:
       redis:
         condition: service_healthy

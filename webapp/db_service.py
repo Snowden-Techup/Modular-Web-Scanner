@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session, joinedload
 from webapp.database import SessionLocal
 from webapp.models import Finding, Scan, User
 
+MAX_SCAN_HISTORY_PER_USER = 10
+
 
 def _ts(dt: datetime | None) -> float:
     if dt is None:
@@ -36,6 +38,42 @@ def scan_to_dict(scan: Scan, findings_rows: list[dict] | None = None) -> dict:
         "error": scan.error,
         "total_requests": scan.total_requests,
     }
+
+
+def scan_to_summary_dict(scan: Scan) -> dict:
+    summary = scan.summary or {}
+    payload = scan.request_payload or {}
+    scan_type = payload.get("scan_type") or payload.get("type") or "-"
+    return {
+        "scan_id": scan.scan_id,
+        "target": scan.target_url,
+        "status": scan.status,
+        "progress_percent": scan.progress_percent,
+        "created_at": _ts(scan.created_at),
+        "scan_type": scan_type,
+        "findings_count": int(summary.get("findings", 0) or 0),
+    }
+
+
+def prune_scan_history(db: Session, owner_id: int, keep: int = MAX_SCAN_HISTORY_PER_USER) -> int:
+    """Keep only the newest `keep` scans per user; return number deleted."""
+    ids = [
+        row[0]
+        for row in db.query(Scan.id)
+        .filter(Scan.owner_id == owner_id)
+        .order_by(Scan.created_at.desc())
+        .all()
+    ]
+    if len(ids) <= keep:
+        return 0
+    drop_ids = ids[keep:]
+    deleted = (
+        db.query(Scan)
+        .filter(Scan.id.in_(drop_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return deleted
 
 
 def findings_from_rows(rows: list[Finding]) -> list[dict]:

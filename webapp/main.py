@@ -34,13 +34,16 @@ from reporter.generator import _finding_sort_key
 from webapp.database import get_db, init_db
 from webapp.database import SessionLocal
 from webapp.db_service import (
+    MAX_SCAN_HISTORY_PER_USER,
     append_scan_log,
     findings_from_rows,
     get_scan_by_public_id,
     get_scan_for_owner,
     get_scan_pk,
+    prune_scan_history,
     replace_scan_findings,
     scan_to_dict,
+    scan_to_summary_dict,
     update_scan_fields,
 )
 from webapp.models import Scan, User
@@ -394,6 +397,7 @@ async def start_scan(
     )
     db.add(scan)
     db.commit()
+    prune_scan_history(db, current_user.id, keep=MAX_SCAN_HISTORY_PER_USER)
     background_tasks.add_task(_run_real_scan, scan_id, req)
     return {
         "status": "accepted",
@@ -425,10 +429,15 @@ async def get_my_scans(
         db.query(Scan)
         .filter(Scan.owner_id == current_user.id)
         .order_by(Scan.created_at.desc())
+        .limit(MAX_SCAN_HISTORY_PER_USER)
         .all()
     )
-    items = [scan_to_dict(row) for row in rows]
-    return {"items": items, "count": len(items)}
+    items = [scan_to_summary_dict(row) for row in rows]
+    return {
+        "items": items,
+        "count": len(items),
+        "max_stored": MAX_SCAN_HISTORY_PER_USER,
+    }
 
 
 def _build_cli_args(req: ScanRequest) -> Namespace:

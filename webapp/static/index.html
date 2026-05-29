@@ -672,6 +672,70 @@
       font-family: "JetBrains Mono", monospace;
     }
 
+    .scan-history-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(10, 16, 30, 0.8);
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+    .scan-history-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .scan-history-head .hint { margin: 0; }
+    .scan-history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .history-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid #2a3a5c;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.55);
+      padding: 10px 12px;
+      color: #dbeafe;
+      cursor: pointer;
+    }
+    .history-item:hover {
+      border-color: #3d5a8a;
+      background: rgba(25, 40, 70, 0.65);
+    }
+    .history-item--active {
+      border-color: #2c7184;
+      background: rgba(34, 211, 238, 0.1);
+    }
+    .history-item-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+      font-size: 0.72rem;
+    }
+    .history-status {
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #93c5fd;
+    }
+    .history-time { color: #64748b; }
+    .history-target {
+      font-size: 0.8rem;
+      word-break: break-all;
+      line-height: 1.35;
+      margin-bottom: 3px;
+    }
+    .history-meta {
+      font-size: 0.72rem;
+      color: #94a3b8;
+    }
+
     @media (min-width: 1240px) {
       .left-scroll {
         display: grid;
@@ -1165,6 +1229,16 @@
     <section class="view report-view" id="reportView">
       <div class="report-title">취약점 스캔 결과 리포트</div>
 
+      <div class="scan-history-box">
+        <div class="scan-history-head">
+          <span class="hint">최근 스캔 기록 (최대 10건)</span>
+          <button id="refreshHistoryBtn" type="button" class="btn-auth">새로고침</button>
+        </div>
+        <div id="scanHistoryList" class="scan-history-list">
+          <div class="muted">로그인 후 저장된 스캔 기록을 불러옵니다.</div>
+        </div>
+      </div>
+
       <div class="stat-grid">
         <div class="stat-card">
           <div class="stat-label">상태</div>
@@ -1179,8 +1253,8 @@
           <div class="stat-value" id="reportTarget" style="font-size: 0.95rem;">-</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label" id="reportFindingsLabel">공격 유형 수</div>
-          <div class="stat-value" id="reportFindings">0</div>
+          <div class="stat-label" id="reportFindingsLabel">공격 유형</div>
+          <div class="stat-value" id="reportFindings">-</div>
         </div>
       </div>
 
@@ -1220,6 +1294,9 @@
     const reportFindings = document.getElementById("reportFindings");
     const reportScanId = document.getElementById("reportScanId");
     const findingList = document.getElementById("findingList");
+    const scanHistoryList = document.getElementById("scanHistoryList");
+    const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
+    let scanHistoryItems = [];
     const loginScreen = document.getElementById("loginScreen");
     const appShell = document.getElementById("appShell");
     const loginUsername = document.getElementById("loginUsername");
@@ -1299,6 +1376,13 @@
         localStorage.removeItem("mws_username");
       }
       renderAuthState();
+      if (accessToken) {
+        loadScanHistory();
+      } else {
+        scanHistoryItems = [];
+        scanHistoryList.innerHTML =
+          '<div class="muted">로그인 후 저장된 스캔 기록을 불러옵니다.</div>';
+      }
     }
 
     function authHeaders(extraHeaders = {}) {
@@ -1372,8 +1456,13 @@
         views.forEach((view) => {
           view.classList.toggle("active", view.id === target);
         });
+        if (target === "reportView") {
+          loadScanHistory();
+        }
       });
     });
+
+    refreshHistoryBtn.addEventListener("click", () => loadScanHistory());
 
     advancedToggle.addEventListener("click", () => {
       const isOpen = advancedWrap.classList.toggle("open");
@@ -1559,28 +1648,21 @@
         </div>`;
     }
 
+    function resolveScanType(scan) {
+      const req = scan.request || {};
+      return req.scan_type || req.type || "-";
+    }
+
     function renderReport(scan) {
       reportScanId.textContent  = `scan_id: ${scan.scan_id || "(없음)"}`;
       reportStatus.textContent  = scan.status || "-";
       reportProgress.textContent = formatProgressPercent(scan);
       reportTarget.textContent  = scan.target || scan.request?.url || "-";
+      reportFindings.textContent = resolveScanType(scan);
 
       const reportVulns  = scan.report_json?.vulnerabilities || [];
       const rawFindings  = scan.findings || [];
       const useGrouped   = reportVulns.length > 0 && isGroupedFormat(reportVulns);
-      const flatFallback = !useGrouped && (rawFindings.length > 0 || reportVulns.length > 0);
-
-      /* ── 요약 카운트 ── */
-      const findingsLabel = document.getElementById("reportFindingsLabel");
-      if (useGrouped) {
-        const sum = scan.report_json?.metadata?.summary || {};
-        reportFindings.textContent = String(sum.vulnerability_types ?? reportVulns.length);
-        if (findingsLabel) findingsLabel.textContent = "공격 유형 수";
-      } else {
-        const n = rawFindings.length || reportVulns.length;
-        reportFindings.textContent = String(n);
-        if (findingsLabel) findingsLabel.textContent = "취약점 수";
-      }
 
       if (useGrouped) {
         const sum = scan.report_json?.metadata?.summary || {};
@@ -1607,6 +1689,72 @@
       findingList.innerHTML = sorted.map((item) => renderFlatCard(item, scan)).join("");
     }
 
+    function formatScanTime(ts) {
+      if (!ts) return "-";
+      return new Date(ts * 1000).toLocaleString("ko-KR");
+    }
+
+    function renderScanHistoryList() {
+      if (!scanHistoryItems.length) {
+        scanHistoryList.innerHTML =
+          '<div class="muted">저장된 스캔 기록이 없습니다. 스캔을 실행해 보세요.</div>';
+        return;
+      }
+      scanHistoryList.innerHTML = scanHistoryItems
+        .map((item) => {
+          const active = item.scan_id === lastScanId ? " history-item--active" : "";
+          const status = escapeHtml(item.status || "-");
+          const target = escapeHtml(item.target || "-");
+          const type = escapeHtml(item.scan_type || "-");
+          const findings = Number(item.findings_count ?? 0);
+          const pct =
+            typeof item.progress_percent === "number"
+              ? `${item.progress_percent.toFixed(1)}%`
+              : "-";
+          return `<button type="button" class="history-item${active}" data-scan-id="${escapeHtml(item.scan_id)}">
+            <div class="history-item-top">
+              <span class="history-status">${status}</span>
+              <span class="history-time">${escapeHtml(formatScanTime(item.created_at))}</span>
+            </div>
+            <div class="history-target">${target}</div>
+            <div class="history-meta">${type} · ${pct} · findings ${findings}</div>
+          </button>`;
+        })
+        .join("");
+      scanHistoryList.querySelectorAll(".history-item").forEach((btn) => {
+        btn.addEventListener("click", () => selectHistoryScan(btn.dataset.scanId));
+      });
+    }
+
+    async function loadScanHistory() {
+      if (!accessToken) {
+        scanHistoryItems = [];
+        scanHistoryList.innerHTML =
+          '<div class="muted">로그인 후 최근 스캔 기록을 볼 수 있습니다.</div>';
+        return;
+      }
+      try {
+        const data = await requestJson("/api/scans");
+        scanHistoryItems = data.items || [];
+        renderScanHistoryList();
+      } catch (err) {
+        scanHistoryList.innerHTML = `<div class="muted">기록 불러오기 실패: ${escapeHtml(String(err))}</div>`;
+      }
+    }
+
+    async function selectHistoryScan(scanId) {
+      if (!scanId || !accessToken) return;
+      lastScanId = scanId;
+      scanMeta.textContent = `scan_id: ${scanId}`;
+      renderScanHistoryList();
+      try {
+        const data = await requestJson(`/api/scan/${scanId}`);
+        renderReport(data);
+      } catch (err) {
+        findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;
+      }
+    }
+
     async function syncScanState() {
       if (!lastScanId) return;
       const data = await requestJson(`/api/scan/${lastScanId}`);
@@ -1620,6 +1768,7 @@
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        await loadScanHistory();
       }
       return data;
     }
@@ -1787,6 +1936,7 @@
         });
         setAuth(data.access_token, data.user?.username || username);
         loginPassword.value = "";
+        await loadScanHistory();
       } catch (err) {
         setAuth("", "");
         showLoginError(`로그인 실패: ${err}`);
@@ -1820,7 +1970,7 @@
         reportTarget.textContent = data.request?.url || "-";
         reportStatus.textContent = "queued";
         reportProgress.textContent = "0.0%";
-        reportFindings.textContent = "0";
+        reportFindings.textContent = payload.scan_type || "all";
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
         updateScanProgressUI({
           status: "queued",
@@ -1834,6 +1984,7 @@
           syncScanState().catch((err) => showScanError(`동기화 실패: ${err}`));
         }, 1000);
         await syncScanState();
+        await loadScanHistory();
       } catch (err) {
         showScanError(`요청 실패: ${err}`);
       }
