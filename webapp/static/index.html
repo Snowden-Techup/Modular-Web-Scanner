@@ -114,14 +114,94 @@
       display: flex;
       flex-direction: column;
     }
+    .app-shell {
+      width: 100%;
+      height: 100%;
+      display: flex;
+    }
     .topbar {
       min-height: 62px;
       border-bottom: 1px solid var(--border);
       background: rgba(9, 13, 24, 0.88);
       display: flex;
       align-items: center;
-      justify-content: flex-start;
+      justify-content: space-between;
       padding: 0 16px;
+      gap: 12px;
+    }
+    .topbar-auth {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-auth {
+      border: 1px solid #3d4f74;
+      color: #dbeafe;
+      background: rgba(18, 26, 45, 0.55);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+    .btn-auth:hover { background: rgba(33, 52, 90, 0.65); }
+    .auth-status {
+      font-size: 0.75rem;
+      color: #93c5fd;
+      white-space: nowrap;
+    }
+    .login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(5, 8, 15, 0.72);
+      backdrop-filter: blur(4px);
+    }
+    .login-screen.hidden {
+      display: none;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 420px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(18, 26, 45, 0.96), rgba(13, 20, 36, 0.98));
+      padding: 20px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+    }
+    .login-title {
+      font-size: 1.1rem;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    .login-subtitle {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 16px;
+    }
+    .login-error {
+      margin-top: 10px;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.78rem;
+      color: #fecaca;
+      background: rgba(127, 29, 29, 0.35);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      word-break: break-word;
+    }
+    .login-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .login-actions .btn-auth {
+      flex: 1;
+      padding: 9px 10px;
+      font-size: 0.8rem;
     }
     .view {
       display: none;
@@ -653,6 +733,28 @@
   </style>
 </head>
 <body>
+  <section class="login-screen hidden" id="loginScreen">
+    <div class="login-card">
+      <div class="login-title">로그인</div>
+      <div class="login-subtitle">스캔 실행·결과 조회 시 로그인이 필요합니다.</div>
+      <div class="mb-3">
+        <label class="form-label" for="loginUsername">아이디</label>
+        <input id="loginUsername" type="text" class="form-control" placeholder="아이디 입력">
+      </div>
+      <div>
+        <label class="form-label" for="loginPassword">비밀번호</label>
+        <input id="loginPassword" type="password" class="form-control" placeholder="비밀번호 입력">
+      </div>
+      <div class="login-actions">
+        <button id="registerBtn" type="button" class="btn-auth">회원가입</button>
+        <button id="loginBtn" type="button" class="btn-auth">로그인</button>
+        <button id="closeLoginBtn" type="button" class="btn-auth">닫기</button>
+      </div>
+      <div id="loginError" class="login-error" hidden></div>
+    </div>
+  </section>
+
+  <div class="app-shell" id="appShell">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
       <div class="sidebar-title">Modular <span class="accent">Web Scanner</span></div>
@@ -671,6 +773,11 @@
   <div class="main-wrap">
     <header class="topbar">
       <div>MWS Runtime</div>
+      <div class="topbar-auth">
+        <button id="openLoginBtn" type="button" class="btn-auth">로그인</button>
+        <button id="logoutBtn" type="button" class="btn-auth" hidden>로그아웃</button>
+        <span id="authStatus" class="auth-status">게스트</span>
+      </div>
     </header>
 
     <section class="view active scan-view" id="scanView">
@@ -1088,6 +1195,7 @@
       </div>
     </section>
   </div>
+  </div>
 
   <script>
     const scanMeta = document.getElementById("scanMeta");
@@ -1112,6 +1220,17 @@
     const reportFindings = document.getElementById("reportFindings");
     const reportScanId = document.getElementById("reportScanId");
     const findingList = document.getElementById("findingList");
+    const loginScreen = document.getElementById("loginScreen");
+    const appShell = document.getElementById("appShell");
+    const loginUsername = document.getElementById("loginUsername");
+    const loginPassword = document.getElementById("loginPassword");
+    const loginError = document.getElementById("loginError");
+    const registerBtn = document.getElementById("registerBtn");
+    const loginBtn = document.getElementById("loginBtn");
+    const openLoginBtn = document.getElementById("openLoginBtn");
+    const closeLoginBtn = document.getElementById("closeLoginBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const authStatus = document.getElementById("authStatus");
     const scanTypeSelect = document.getElementById("scan_type");
     const moduleDetailSection = document.getElementById("moduleDetailSection");
     const detailPanelSqli = document.getElementById("detailPanelSqli");
@@ -1124,6 +1243,8 @@
     const moduleDetailHint = document.getElementById("moduleDetailHint");
     let lastScanId = "";
     let pollTimer = null;
+    let accessToken = localStorage.getItem("mws_access_token") || "";
+    let currentUsername = localStorage.getItem("mws_username") || "";
 
     function showScanError(msg) {
       scanErrorBanner.textContent = msg;
@@ -1133,6 +1254,57 @@
     function clearScanError() {
       scanErrorBanner.hidden = true;
       scanErrorBanner.textContent = "";
+    }
+
+    function showLoginError(msg) {
+      loginError.textContent = msg;
+      loginError.hidden = !msg;
+    }
+
+    function openLoginModal() {
+      loginScreen.classList.remove("hidden");
+      showLoginError("");
+      loginUsername.focus();
+    }
+
+    function closeLoginModal() {
+      loginScreen.classList.add("hidden");
+      showLoginError("");
+    }
+
+    function renderAuthState() {
+      if (accessToken) {
+        authStatus.textContent = `로그인: ${currentUsername || "(unknown)"}`;
+        openLoginBtn.hidden = true;
+        logoutBtn.hidden = false;
+        closeLoginModal();
+      } else {
+        authStatus.textContent = "게스트 (스캔 시 로그인 필요)";
+        openLoginBtn.hidden = false;
+        logoutBtn.hidden = true;
+      }
+    }
+
+    function setAuth(token, username) {
+      accessToken = token || "";
+      currentUsername = username || "";
+      if (accessToken) {
+        localStorage.setItem("mws_access_token", accessToken);
+      } else {
+        localStorage.removeItem("mws_access_token");
+      }
+      if (currentUsername) {
+        localStorage.setItem("mws_username", currentUsername);
+      } else {
+        localStorage.removeItem("mws_username");
+      }
+      renderAuthState();
+    }
+
+    function authHeaders(extraHeaders = {}) {
+      const headers = { ...extraHeaders };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+      return headers;
     }
 
     function formatProgressPercent(scan) {
@@ -1540,10 +1712,20 @@
       return v;
     }
 
-    async function requestJson(url, options) {
-      const res = await fetch(url, options);
-      const data = await res.json();
-      if (!res.ok) throw new Error(JSON.stringify(data, null, 2));
+    async function requestJson(url, options = {}) {
+      const opts = { ...options };
+      opts.headers = authHeaders(options.headers || {});
+      const res = await fetch(url, opts);
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        data = { detail: `HTTP ${res.status}` };
+      }
+      if (!res.ok) {
+        const msg = data?.detail || JSON.stringify(data);
+        throw new Error(msg);
+      }
       return data;
     }
 
@@ -1561,9 +1743,69 @@
     }
 
     applySchemaDefaults();
+    renderAuthState();
+
+    openLoginBtn.addEventListener("click", () => openLoginModal());
+    closeLoginBtn.addEventListener("click", () => closeLoginModal());
+    loginScreen.addEventListener("click", (e) => {
+      if (e.target === loginScreen) closeLoginModal();
+    });
+
+    registerBtn.addEventListener("click", async () => {
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value;
+      if (!username || !password) {
+        showLoginError("회원가입용 아이디/비밀번호를 입력하세요.");
+        return;
+      }
+      showLoginError("");
+      try {
+        await requestJson("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        showLoginError(`가입 완료: ${username} (이제 로그인하세요)`);
+      } catch (err) {
+        showLoginError(`회원가입 실패: ${err}`);
+      }
+    });
+
+    loginBtn.addEventListener("click", async () => {
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value;
+      if (!username || !password) {
+        showLoginError("로그인용 아이디/비밀번호를 입력하세요.");
+        return;
+      }
+      showLoginError("");
+      try {
+        const data = await requestJson("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        setAuth(data.access_token, data.user?.username || username);
+        loginPassword.value = "";
+      } catch (err) {
+        setAuth("", "");
+        showLoginError(`로그인 실패: ${err}`);
+      }
+    });
+
+    logoutBtn.addEventListener("click", () => {
+      setAuth("", "");
+      loginPassword.value = "";
+      clearScanError();
+    });
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (!accessToken) {
+        openLoginModal();
+        showScanError("스캔 실행 전 로그인이 필요합니다. 상단 로그인 버튼을 이용하세요.");
+        return;
+      }
       const payload = buildPayload();
       clearScanError();
       try {

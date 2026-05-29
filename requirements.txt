@@ -6,5 +6,6 @@ PyJWT
 pydantic
 psycopg[binary]
 redis
+sqlalchemy
 typing_extensions
 uvicorn[standard]

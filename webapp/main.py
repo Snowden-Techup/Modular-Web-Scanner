@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi import Depends, Header, status
+from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +31,19 @@ from fuzzer.request_builder import build_and_send_request
 from reporter import ReportGenerator
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
 from reporter.generator import _finding_sort_key
+from webapp.database import get_db, init_db
+from webapp.database import SessionLocal
+from webapp.db_service import (
+    append_scan_log,
+    findings_from_rows,
+    get_scan_by_public_id,
+    get_scan_for_owner,
+    get_scan_pk,
+    replace_scan_findings,
+    scan_to_dict,
+    update_scan_fields,
+)
+from webapp.models import Scan, User
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -169,10 +185,41 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
 
 
+def _seed_default_user(db: Session) -> None:
+    if not DEFAULT_ADMIN_USERNAME:
+        return
+    exists = (
+        db.query(User).filter(User.username == DEFAULT_ADMIN_USERNAME).first()
+    )
+    if exists is not None:
+        return
+    salt = secrets.token_hex(16)
+    db.add(
+        User(
+            username=DEFAULT_ADMIN_USERNAME,
+            salt=salt,
+            password_hash=_hash_password(DEFAULT_ADMIN_PASSWORD, salt),
+        )
+    )
+    db.commit()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    db = SessionLocal()
+    try:
+        _seed_default_user(db)
+    finally:
+        db.close()
+    yield
+
+
 app = FastAPI(
     title="Modular Web Scanner API",
     description="Web UI backend connected to the real CLI scan pipeline.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -183,10 +230,8 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-scans_db: dict[str, dict] = {}
-users_db: dict[int, dict] = {}
-users_by_name: dict[str, int] = {}
-_next_user_id = 1
+DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin1234")
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -218,7 +263,10 @@ def _parse_bearer_token(authorization: str | None) -> str:
     return token
 
 
-def _get_current_user(authorization: str | None = Header(default=None)) -> dict:
+def _get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
     token = _parse_bearer_token(authorization)
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
@@ -237,7 +285,7 @@ def _get_current_user(authorization: str | None = Header(default=None)) -> dict:
             detail="Invalid token subject.",
         ) from exc
 
-    user = users_db.get(user_id)
+    user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -246,60 +294,51 @@ def _get_current_user(authorization: str | None = Header(default=None)) -> dict:
     return user
 
 
-def _require_scan_owner(scan: dict, user: dict) -> None:
-    if scan.get("owner_id") != user["id"]:
-        raise HTTPException(status_code=404, detail="Scan ID not found")
-
-
 @app.post("/api/auth/register")
-async def register_user(req: RegisterRequest) -> dict:
-    global _next_user_id
+async def register_user(req: RegisterRequest, db: Session = Depends(get_db)) -> dict:
     normalized_username = req.username.strip().lower()
     if not normalized_username:
         raise HTTPException(status_code=400, detail="Username is required.")
-    if normalized_username in users_by_name:
+    if db.query(User).filter(User.username == normalized_username).first():
         raise HTTPException(status_code=409, detail="Username already exists.")
 
     salt = secrets.token_hex(16)
-    user = {
-        "id": _next_user_id,
-        "username": normalized_username,
-        "salt": salt,
-        "password_hash": _hash_password(req.password, salt),
-        "created_at": time.time(),
-    }
-    users_db[_next_user_id] = user
-    users_by_name[normalized_username] = _next_user_id
-    _next_user_id += 1
-    return {"status": "created", "user_id": user["id"], "username": user["username"]}
+    user = User(
+        username=normalized_username,
+        salt=salt,
+        password_hash=_hash_password(req.password, salt),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"status": "created", "user_id": user.id, "username": user.username}
 
 
 @app.post("/api/auth/login")
-async def login_user(req: LoginRequest) -> dict:
+async def login_user(req: LoginRequest, db: Session = Depends(get_db)) -> dict:
     normalized_username = req.username.strip().lower()
-    user_id = users_by_name.get(normalized_username)
-    if user_id is None:
+    user = db.query(User).filter(User.username == normalized_username).first()
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
-    user = users_db[user_id]
-    expected_hash = _hash_password(req.password, user["salt"])
-    if expected_hash != user["password_hash"]:
+    expected_hash = _hash_password(req.password, user.salt)
+    if expected_hash != user.password_hash:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    token = _create_access_token(user["id"], user["username"])
+    token = _create_access_token(user.id, user.username)
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user["id"], "username": user["username"]},
+        "user": {"id": user.id, "username": user.username},
         "expires_in_minutes": JWT_EXPIRES_MINUTES,
     }
 
 
 @app.get("/api/auth/me")
-async def get_me(current_user: dict = Depends(_get_current_user)) -> dict:
+async def get_me(current_user: User = Depends(_get_current_user)) -> dict:
     return {
-        "id": current_user["id"],
-        "username": current_user["username"],
-        "created_at": current_user["created_at"],
+        "id": current_user.id,
+        "username": current_user.username,
+        "created_at": current_user.created_at.timestamp(),
     }
 
 
@@ -332,34 +371,29 @@ async def get_schema() -> dict:
 async def start_scan(
     req: ScanRequest,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
 ) -> dict:
     scan_id = str(uuid4())
-    now = time.time()
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
-        "owner_id": current_user["id"],
-        "status": "queued",
-        "progress": 0,
-        "progress_percent": 0.0,
-        "created_at": now,
-        "updated_at": now,
-        "request": req.model_dump(by_alias=True),
-        "target": req.target_url,
-        "findings": [],
-        "summary": {
+    scan = Scan(
+        scan_id=scan_id,
+        owner_id=current_user.id,
+        target_url=req.target_url,
+        status="queued",
+        progress=0,
+        progress_percent=0.0,
+        request_payload=req.model_dump(by_alias=True),
+        summary={
             "queued": 0,
             "completed": 0,
             "failures": 0,
             "findings": 0,
             "elapsed_time": 0.0,
         },
-        "logs": [],
-        "report_json": None,
-        "result": None,
-        "total_requests": None,
-        "progress_percent": 0.0,
-    }
+        logs=[],
+    )
+    db.add(scan)
+    db.commit()
     background_tasks.add_task(_run_real_scan, scan_id, req)
     return {
         "status": "accepted",
@@ -370,19 +404,31 @@ async def start_scan(
 
 
 @app.get("/api/scan/{scan_id}")
-async def get_scan(scan_id: str, current_user: dict = Depends(_get_current_user)) -> dict:
-    scan = scans_db.get(scan_id)
+async def get_scan(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+) -> dict:
+    scan = get_scan_for_owner(db, scan_id, current_user.id)
     if scan is None:
         raise HTTPException(status_code=404, detail="Scan ID not found")
-    _require_scan_owner(scan, current_user)
-    return scan
+    findings_rows = findings_from_rows(scan.findings)
+    return scan_to_dict(scan, findings_rows)
 
 
 @app.get("/api/scans")
-async def get_my_scans(current_user: dict = Depends(_get_current_user)) -> dict:
-    rows = [scan for scan in scans_db.values() if scan.get("owner_id") == current_user["id"]]
-    rows.sort(key=lambda item: item.get("created_at", 0), reverse=True)
-    return {"items": rows, "count": len(rows)}
+async def get_my_scans(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+) -> dict:
+    rows = (
+        db.query(Scan)
+        .filter(Scan.owner_id == current_user.id)
+        .order_by(Scan.created_at.desc())
+        .all()
+    )
+    items = [scan_to_dict(row) for row in rows]
+    return {"items": items, "count": len(items)}
 
 
 def _build_cli_args(req: ScanRequest) -> Namespace:
@@ -489,37 +535,28 @@ def _serialize_findings(findings) -> list[dict[str, str]]:
     return serialized
 
 
-def _scan_log(scan: dict, message: str) -> None:
-    scan.setdefault("logs", []).append(f"[{time.strftime('%H:%M:%S')}] {message}")
-
-
 async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
     started_at = time.monotonic()
-    scan = scans_db.get(scan_id)
-    if scan is None:
-        return
-
-    scan["status"] = "running"
-    scan["updated_at"] = time.time()
-    _scan_log(scan, f"스캔 시작: target={req.target_url}, type={req.scan_type}")
+    update_scan_fields(scan_id, status="running")
+    append_scan_log(scan_id, f"스캔 시작: target={req.target_url}, type={req.scan_type}")
 
     try:
         args = _build_cli_args(req)
         if args.type == "oob":
-            _scan_log(scan, f"OAST 서버: {args.oob_server}")
-        _scan_log(scan, "CLI 인자 구성 완료")
+            append_scan_log(scan_id, f"OAST 서버: {args.oob_server}")
+        append_scan_log(scan_id, "CLI 인자 구성 완료")
         cookies = parse_cookies(args.cookie) if args.cookie else {}
-        _scan_log(scan, "공격면 수집 시작")
+        append_scan_log(scan_id, "공격면 수집 시작")
         surfaces = await resolve_surfaces(args, base_url=args.url, cookies=cookies)
         if not surfaces:
             raise RuntimeError("No attack surfaces resolved from target.")
-        _scan_log(scan, f"공격면 수집 완료: {len(surfaces)}개")
+        append_scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
 
         context = prepare_scan_context(args, surfaces)
         if context is None:
             raise RuntimeError("Scan context preparation failed.")
-        _scan_log(
-            scan,
+        append_scan_log(
+            scan_id,
             "스캔 컨텍스트 구성 완료 "
             f"(modules={len(context['modules'])}, total_requests={context['total_requests']})",
         )
@@ -537,7 +574,7 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
             return await build_and_send_request(session, surface, parameter, payload)
 
         total_requests = max(1, context["total_requests"])
-        scan["total_requests"] = total_requests
+        update_scan_fields(scan_id, total_requests=total_requests)
         last_logged_progress = -1.0
         bf_true_random_milestone_logs = args.type == "bruteforce" and bool(
             getattr(args, "bf_true_random", False)
@@ -563,9 +600,7 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
             )
             if not scan_task.done() and progress_pct >= 99.9:
                 progress_pct = 99.9
-            scan["progress_percent"] = progress_pct
-            scan["progress"] = int(progress_pct)
-            scan["summary"] = {
+            summary = {
                 "queued": queued_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
@@ -574,18 +609,23 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
                 "total_requests": effective_total,
                 "planned_requests": planned_total,
             }
-            scan["updated_at"] = time.time()
+            update_scan_fields(
+                scan_id,
+                progress_percent=progress_pct,
+                progress=int(progress_pct),
+                summary=summary,
+            )
             if progress_pct != last_logged_progress:
-                _scan_log(
-                    scan,
+                append_scan_log(
+                    scan_id,
                     f"진행률 {progress_pct}% (completed={engine.stats.completed}, findings={engine.stats.findings}, failures={engine.stats.failures})",
                 )
                 last_logged_progress = progress_pct
             if bf_true_random_milestone_logs:
                 completed_now = engine.stats.completed
                 while completed_now >= next_completed_log_milestone:
-                    _scan_log(
-                        scan,
+                    append_scan_log(
+                        scan_id,
                         f"[true-random BF] 누적 요청 완료 {next_completed_log_milestone}건 "
                         f"(queued={engine.stats.queued}, findings={engine.stats.findings}, failures={engine.stats.failures})",
                     )
@@ -595,23 +635,19 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
         stats = await scan_task
         reporter = ReportGenerator(stats=stats, findings=engine.findings)
         reporter.export_to_json(args.output)
-        _scan_log(scan, f"리포트 파일 저장 완료: {args.output}")
+        append_scan_log(scan_id, f"리포트 파일 저장 완료: {args.output}")
 
         report_json = None
         try:
             with open(args.output, "r", encoding="utf-8") as fp:
                 report_json = json.load(fp)
-            _scan_log(scan, "리포트 JSON 로드 완료")
+            append_scan_log(scan_id, "리포트 JSON 로드 완료")
         except (OSError, json.JSONDecodeError) as exc:
-            _scan_log(scan, f"리포트 JSON 로드 실패: {exc}")
+            append_scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
         findings = _serialize_findings(engine.findings)
         final_total = max(total_requests, stats.queued, stats.completed, 1)
-        scan["status"] = "completed"
-        scan["progress"] = 100
-        scan["progress_percent"] = 100.0
-        scan["findings"] = findings
-        scan["summary"] = {
+        summary = {
             "queued": stats.queued,
             "completed": stats.completed,
             "failures": stats.failures,
@@ -620,7 +656,7 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
             "total_requests": final_total,
             "planned_requests": total_requests,
         }
-        scan["result"] = {
+        result = {
             "summary": {
                 "target": args.url,
                 "scan_type": args.type,
@@ -629,24 +665,38 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
                 "output": args.output,
             }
         }
-        scan["report_json"] = report_json
-        scan["updated_at"] = time.time()
-        _scan_log(scan, "스캔 완료")
+        update_scan_fields(
+            scan_id,
+            status="completed",
+            progress=100,
+            progress_percent=100.0,
+            summary=summary,
+            result=result,
+            report_json=report_json,
+            error=None,
+        )
+        scan_pk = get_scan_pk(scan_id)
+        if scan_pk is not None:
+            replace_scan_findings(scan_pk, findings)
+        append_scan_log(scan_id, "스캔 완료")
     except Exception as exc:
-        scan["status"] = "failed"
-        scan["progress"] = int(scan.get("progress_percent") or scan.get("progress") or 0)
-        scan["error"] = str(exc)
-        prev = scan.get("summary") or {}
-        scan["summary"] = {
-            "queued": prev.get("queued", 0),
-            "completed": prev.get("completed", 0),
-            "failures": prev.get("failures", 0),
-            "findings": prev.get("findings", 0),
-            "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": scan.get("total_requests"),
-        }
-        scan["updated_at"] = time.time()
-        _scan_log(scan, f"스캔 실패: {exc}")
+        scan_row = get_scan_by_public_id(scan_id)
+        prev = (scan_row.summary if scan_row else None) or {}
+        update_scan_fields(
+            scan_id,
+            status="failed",
+            progress=int((scan_row.progress_percent if scan_row else 0) or 0),
+            error=str(exc),
+            summary={
+                "queued": prev.get("queued", 0),
+                "completed": prev.get("completed", 0),
+                "failures": prev.get("failures", 0),
+                "findings": prev.get("findings", 0),
+                "elapsed_time": round(time.monotonic() - started_at, 2),
+                "total_requests": scan_row.total_requests if scan_row else None,
+            },
+        )
+        append_scan_log(scan_id, f"스캔 실패: {exc}")
 
 
 @app.get("/")

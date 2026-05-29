@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session, joinedload
+
+from webapp.database import SessionLocal
+from webapp.models import Finding, Scan, User
+
+
+def _ts(dt: datetime | None) -> float:
+    if dt is None:
+        return time.time()
+    if dt.tzinfo is None:
+        return dt.timestamp()
+    return dt.timestamp()
+
+
+def scan_to_dict(scan: Scan, findings_rows: list[dict] | None = None) -> dict:
+    return {
+        "scan_id": scan.scan_id,
+        "owner_id": scan.owner_id,
+        "status": scan.status,
+        "progress": scan.progress,
+        "progress_percent": scan.progress_percent,
+        "created_at": _ts(scan.created_at),
+        "updated_at": _ts(scan.updated_at),
+        "request": scan.request_payload,
+        "target": scan.target_url,
+        "findings": findings_rows if findings_rows is not None else [],
+        "summary": scan.summary or {},
+        "logs": scan.logs or [],
+        "report_json": scan.report_json,
+        "result": scan.result,
+        "error": scan.error,
+        "total_requests": scan.total_requests,
+    }
+
+
+def findings_from_rows(rows: list[Finding]) -> list[dict]:
+    return [
+        {
+            "severity": row.severity,
+            "location": row.location or "",
+            "parameter": row.parameter or "",
+            "url": row.url or "",
+            "type": row.vulnerability_type,
+            "payload": row.payload or "",
+        }
+        for row in rows
+    ]
+
+
+def get_scan_for_owner(db: Session, scan_id: str, owner_id: int) -> Scan | None:
+    return (
+        db.query(Scan)
+        .options(joinedload(Scan.findings))
+        .filter(Scan.scan_id == scan_id, Scan.owner_id == owner_id)
+        .first()
+    )
+
+
+def get_scan_by_public_id(scan_id: str) -> Scan | None:
+    db = SessionLocal()
+    try:
+        return db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    finally:
+        db.close()
+
+
+def get_scan_pk(scan_id: str) -> int | None:
+    scan = get_scan_by_public_id(scan_id)
+    return scan.id if scan else None
+
+
+def append_scan_log(scan_id: str, message: str) -> None:
+    db = SessionLocal()
+    try:
+        scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if scan is None:
+            return
+        logs = list(scan.logs or [])
+        logs.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        scan.logs = logs
+        scan.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    finally:
+        db.close()
+
+
+def update_scan_fields(scan_id: str, **fields) -> None:
+    db = SessionLocal()
+    try:
+        scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if scan is None:
+            return
+        for key, value in fields.items():
+            setattr(scan, key, value)
+        scan.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    finally:
+        db.close()
+
+
+def replace_scan_findings(scan_pk: int, serialized: list[dict]) -> None:
+    db = SessionLocal()
+    try:
+        db.query(Finding).filter(Finding.scan_id == scan_pk).delete()
+        for item in serialized:
+            db.add(
+                Finding(
+                    scan_id=scan_pk,
+                    vulnerability_type=str(item.get("type", "Unknown")),
+                    severity=str(item.get("severity", "unknown")),
+                    location=item.get("location"),
+                    parameter=item.get("parameter"),
+                    url=item.get("url"),
+                    payload=item.get("payload"),
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
