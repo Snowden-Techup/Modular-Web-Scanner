@@ -570,8 +570,12 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
             delay=context["delay"],
         )
 
-        async def _request_sender(session, surface, parameter, payload):
-            return await build_and_send_request(session, surface, parameter, payload)
+        async def _request_sender(
+            session, surface, parameter, payload, allow_redirects=True
+        ):
+            return await build_and_send_request(
+                session, surface, parameter, payload, allow_redirects=allow_redirects
+            )
 
         total_requests = max(1, context["total_requests"])
         update_scan_fields(scan_id, total_requests=total_requests)
