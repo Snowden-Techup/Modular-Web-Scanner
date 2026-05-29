@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-from argparse import Namespace
-import asyncio
 import hashlib
-import json
 import os
 import secrets
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -14,7 +10,7 @@ from uuid import uuid4
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi import Depends, Header, status
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,30 +19,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import jwt
 
-from cli.options import parse_bf_length, parse_cookies
-from cli.runner import prepare_scan_context
-from cli.surfaces import resolve_surfaces
-from fuzzer import FuzzerEngine
-from fuzzer.request_builder import build_and_send_request
-from reporter import ReportGenerator
-from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
-from reporter.generator import _finding_sort_key
+from modules.oob.client import DEFAULT_OAST_SERVER_URL
+from webapp.celery_app import celery_app  # noqa: F401 — Celery 앱 등록
 from webapp.database import get_db, init_db
 from webapp.database import SessionLocal
 from webapp.db_service import (
     MAX_SCAN_HISTORY_PER_USER,
-    append_scan_log,
     findings_from_rows,
-    get_scan_by_public_id,
     get_scan_for_owner,
-    get_scan_pk,
     prune_scan_history,
-    replace_scan_findings,
     scan_to_dict,
     scan_to_summary_dict,
-    update_scan_fields,
 )
 from webapp.models import Scan, User
+from webapp.tasks import run_scan as celery_run_scan
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -67,10 +53,6 @@ SCAN_TYPES = [
     "reflected_xss",
     "oob",
 ]
-
-# Web UI: true-random bruteforce는 total_requests 대비 진행률이 오래 안 바뀌는 경우가 있어
-# 이 모드에서만 N건 단위 보조 로그를 남긴다. (그 외는 진행률% 변경 시만 로그)
-SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
 
 
 class AuthSettings(BaseModel):
@@ -373,11 +355,11 @@ async def get_schema() -> dict:
 @app.post("/api/scan/start")
 async def start_scan(
     req: ScanRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(_get_current_user),
 ) -> dict:
     scan_id = str(uuid4())
+    request_payload = req.model_dump(by_alias=True)
     scan = Scan(
         scan_id=scan_id,
         owner_id=current_user.id,
@@ -385,7 +367,7 @@ async def start_scan(
         status="queued",
         progress=0,
         progress_percent=0.0,
-        request_payload=req.model_dump(by_alias=True),
+        request_payload=request_payload,
         summary={
             "queued": 0,
             "completed": 0,
@@ -398,12 +380,13 @@ async def start_scan(
     db.add(scan)
     db.commit()
     prune_scan_history(db, current_user.id, keep=MAX_SCAN_HISTORY_PER_USER)
-    background_tasks.add_task(_run_real_scan, scan_id, req)
+    # Celery 큐로 작업 위임 — FastAPI는 즉시 응답
+    celery_run_scan.delay(scan_id, request_payload)
     return {
         "status": "accepted",
-        "message": "Scan registered in queue.",
+        "message": "Scan queued to Celery worker.",
         "scan_id": scan_id,
-        "request": req.model_dump(by_alias=True),
+        "request": request_payload,
     }
 
 
@@ -440,276 +423,6 @@ async def get_my_scans(
     }
 
 
-def _build_cli_args(req: ScanRequest) -> Namespace:
-    bf_min_length = req.bruteforce.bf_min_length
-    bf_max_length = req.bruteforce.bf_max_length
-    if req.bruteforce.bf_length.strip():
-        bf_min_length, bf_max_length = parse_bf_length(
-            req.bruteforce.bf_length,
-            req.bruteforce.bf_max_length,
-        )
-
-    level = req.level
-    sqli_evasion_level = level
-    osci_evasion_level = req.osci.evasion_level
-    lfi_evasion_level = level
-    ssrf_evasion_level = min(level, 2)
-    sxss_evasion_level = level
-    rxss_evasion_level = req.reflected_xss.evasion_level
-
-    return Namespace(
-        # Core scan options
-        url=req.target_url,
-        rps=req.engine.rps,
-        cookie=req.auth.cookie,
-        login_url=req.auth.login_url,
-        username=req.auth.username,
-        password=req.auth.password,
-        username_field=req.auth.username_field,
-        password_field=req.auth.password_field,
-        csrf_field=req.auth.csrf_field,
-        submit_field=req.auth.submit_field,
-        output=req.engine.output,
-        surfaces_output=req.engine.surfaces_output,
-        type=req.scan_type,
-        session_pool_size=req.engine.session_pool_size,
-        level=level,
-        # Bruteforce options
-        bf_wordlist=req.bruteforce.bf_wordlist,
-        bf_disable_mutation=req.bruteforce.bf_disable_mutation,
-        bf_mutation_level=req.bruteforce.bf_mutation_level,
-        bf_true_random=req.bruteforce.bf_true_random,
-        bf_charset=req.bruteforce.bf_charset,
-        bf_min_length=bf_min_length,
-        bf_max_length=bf_max_length,
-        bf_length=req.bruteforce.bf_length,
-        bf_max_dictionary=req.bruteforce.bf_max_dictionary,
-        bf_max_true_random=req.bruteforce.bf_max_true_random,
-        bf_stop_on_first_hit=req.bruteforce.bf_stop_on_first_hit,
-        bf_target_url=req.bruteforce.bf_target_url,
-        bf_method=req.bruteforce.bf_method,
-        bf_fuzz_param=req.bruteforce.bf_fuzz_param,
-        bf_target_param=req.bruteforce.bf_target_param,
-        bf_username_param=req.bruteforce.bf_username_param,
-        bf_username=req.bruteforce.bf_username,
-        bf_extra_params=req.bruteforce.bf_extra_params,
-        # SQLi / OSCi / LFI / SSRF (names aligned with cli.parser / fuzzer.setup)
-        sqli_evasion_level=sqli_evasion_level,
-        sqli_time_based=req.sqli.include_time_based,
-        sqli_time_max=req.sqli.max_time_payloads,
-        target_dbms=req.sqli.target_dbms,
-        osci_evasion_level=osci_evasion_level,
-        osci_time_based=req.osci.include_time_based,
-        osci_time_max=req.osci.max_time_payloads,
-        target_os=req.osci.target_os,
-        lfi_evasion_level=lfi_evasion_level,
-        ssrf_evasion_level=ssrf_evasion_level,
-        ssrf_oob=req.ssrf.ssrf_include_oob,
-        sxss_evasion_level=sxss_evasion_level,
-        sxss_scan_mode=req.stored_xss.scan_mode,
-        sxss_max_risk_level=req.stored_xss.max_risk_level,
-        sxss_categories=list(req.stored_xss.categories),
-        sxss_target_params=list(req.stored_xss.target_params),
-        rxss_evasion_level=rxss_evasion_level,
-        # OOB / OAST (standalone callback detection)
-        oob_server=normalize_oast_server_url(req.oob.oob_server),
-        oob_retries=req.oob.oob_retries,
-        oob_poll_delay=req.oob.oob_poll_delay,
-        oob_poll_timeout=req.oob.oob_poll_timeout,
-    )
-
-
-def _serialize_findings(findings) -> list[dict[str, str]]:
-    serialized: list[dict[str, str]] = []
-    for finding in sorted(findings, key=_finding_sort_key):
-        payload_obj = finding.payload
-        severity = str(getattr(payload_obj, "risk_level", "HIGH"))
-        attack_type = str(
-            getattr(payload_obj, "attack_type", finding.module_name or "Unknown")
-        )
-        payload_value = str(getattr(payload_obj, "value", payload_obj))
-        param_location = getattr(finding.surface, "param_location", "unknown")
-        location_text = str(getattr(param_location, "name", param_location))
-
-        serialized.append(
-            {
-                "severity": severity,
-                "location": location_text,
-                "parameter": str(finding.parameter),
-                "url": str(getattr(finding.surface, "url", "") or ""),
-                "type": attack_type,
-                "payload": payload_value,
-            }
-        )
-    return serialized
-
-
-async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
-    started_at = time.monotonic()
-    update_scan_fields(scan_id, status="running")
-    append_scan_log(scan_id, f"스캔 시작: target={req.target_url}, type={req.scan_type}")
-
-    try:
-        args = _build_cli_args(req)
-        if args.type == "oob":
-            append_scan_log(scan_id, f"OAST 서버: {args.oob_server}")
-        append_scan_log(scan_id, "CLI 인자 구성 완료")
-        cookies = parse_cookies(args.cookie) if args.cookie else {}
-        append_scan_log(scan_id, "공격면 수집 시작")
-        surfaces = await resolve_surfaces(args, base_url=args.url, cookies=cookies)
-        if not surfaces:
-            raise RuntimeError("No attack surfaces resolved from target.")
-        append_scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
-
-        context = prepare_scan_context(args, surfaces)
-        if context is None:
-            raise RuntimeError("Scan context preparation failed.")
-        append_scan_log(
-            scan_id,
-            "스캔 컨텍스트 구성 완료 "
-            f"(modules={len(context['modules'])}, total_requests={context['total_requests']})",
-        )
-
-        engine = FuzzerEngine(
-            max_concurrent_requests=context["concurrency"],
-            worker_count=context["queue_workers"],
-            modules=context["modules"],
-            concurrency_per_module=context["queue_workers"],
-            session_pool_size=max(1, args.session_pool_size),
-            delay=context["delay"],
-        )
-
-        async def _request_sender(
-            session, surface, parameter, payload, allow_redirects=True
-        ):
-            return await build_and_send_request(
-                session, surface, parameter, payload, allow_redirects=allow_redirects
-            )
-
-        total_requests = max(1, context["total_requests"])
-        update_scan_fields(scan_id, total_requests=total_requests)
-        last_logged_progress = -1.0
-        bf_true_random_milestone_logs = args.type == "bruteforce" and bool(
-            getattr(args, "bf_true_random", False)
-        )
-        next_completed_log_milestone = (
-            SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
-        )
-        scan_task = asyncio.create_task(
-            engine.run_with_attack_modules(
-                surfaces=surfaces,
-                request_sender=_request_sender,
-            )
-        )
-
-        while not scan_task.done():
-            planned_total = total_requests
-            queued_total = engine.stats.queued
-            effective_total = max(planned_total, queued_total, 1)
-            completed = engine.stats.completed
-            progress_pct = min(
-                100.0,
-                round(completed / effective_total * 100, 1),
-            )
-            if not scan_task.done() and progress_pct >= 99.9:
-                progress_pct = 99.9
-            summary = {
-                "queued": queued_total,
-                "completed": completed,
-                "failures": engine.stats.failures,
-                "findings": engine.stats.findings,
-                "elapsed_time": round(time.monotonic() - started_at, 2),
-                "total_requests": effective_total,
-                "planned_requests": planned_total,
-            }
-            update_scan_fields(
-                scan_id,
-                progress_percent=progress_pct,
-                progress=int(progress_pct),
-                summary=summary,
-            )
-            if progress_pct != last_logged_progress:
-                append_scan_log(
-                    scan_id,
-                    f"진행률 {progress_pct}% (completed={engine.stats.completed}, findings={engine.stats.findings}, failures={engine.stats.failures})",
-                )
-                last_logged_progress = progress_pct
-            if bf_true_random_milestone_logs:
-                completed_now = engine.stats.completed
-                while completed_now >= next_completed_log_milestone:
-                    append_scan_log(
-                        scan_id,
-                        f"[true-random BF] 누적 요청 완료 {next_completed_log_milestone}건 "
-                        f"(queued={engine.stats.queued}, findings={engine.stats.findings}, failures={engine.stats.failures})",
-                    )
-                    next_completed_log_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
-            await asyncio.sleep(0.3)
-
-        stats = await scan_task
-        reporter = ReportGenerator(stats=stats, findings=engine.findings)
-        reporter.export_to_json(args.output)
-        append_scan_log(scan_id, f"리포트 파일 저장 완료: {args.output}")
-
-        report_json = None
-        try:
-            with open(args.output, "r", encoding="utf-8") as fp:
-                report_json = json.load(fp)
-            append_scan_log(scan_id, "리포트 JSON 로드 완료")
-        except (OSError, json.JSONDecodeError) as exc:
-            append_scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
-
-        findings = _serialize_findings(engine.findings)
-        final_total = max(total_requests, stats.queued, stats.completed, 1)
-        summary = {
-            "queued": stats.queued,
-            "completed": stats.completed,
-            "failures": stats.failures,
-            "findings": stats.findings,
-            "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": final_total,
-            "planned_requests": total_requests,
-        }
-        result = {
-            "summary": {
-                "target": args.url,
-                "scan_type": args.type,
-                "total_requests": stats.completed,
-                "findings": len(findings),
-                "output": args.output,
-            }
-        }
-        update_scan_fields(
-            scan_id,
-            status="completed",
-            progress=100,
-            progress_percent=100.0,
-            summary=summary,
-            result=result,
-            report_json=report_json,
-            error=None,
-        )
-        scan_pk = get_scan_pk(scan_id)
-        if scan_pk is not None:
-            replace_scan_findings(scan_pk, findings)
-        append_scan_log(scan_id, "스캔 완료")
-    except Exception as exc:
-        scan_row = get_scan_by_public_id(scan_id)
-        prev = (scan_row.summary if scan_row else None) or {}
-        update_scan_fields(
-            scan_id,
-            status="failed",
-            progress=int((scan_row.progress_percent if scan_row else 0) or 0),
-            error=str(exc),
-            summary={
-                "queued": prev.get("queued", 0),
-                "completed": prev.get("completed", 0),
-                "failures": prev.get("failures", 0),
-                "findings": prev.get("findings", 0),
-                "elapsed_time": round(time.monotonic() - started_at, 2),
-                "total_requests": scan_row.total_requests if scan_row else None,
-            },
-        )
-        append_scan_log(scan_id, f"스캔 실패: {exc}")
 
 
 @app.get("/")

@@ -46,8 +46,7 @@ services:
   celery_worker:
     build: .
     container_name: scanner_worker
-    # TODO: Replace with your actual Celery app path.
-    command: celery -A webapp.main.celery_app worker --concurrency=4 --loglevel=info
+    command: celery -A webapp.celery_app worker --concurrency=4 --loglevel=info
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
