@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import time
 
 from argparse import Namespace
 from celery import Task
+from pathlib import Path
 
 from webapp.celery_app import celery_app
 from webapp.db_service import (
@@ -128,6 +130,30 @@ def _serialize_findings(findings) -> list[dict]:
 
 
 SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
+SCAN_REPORT_ARCHIVE_DIR = Path("report")
+SCAN_RUNTIME_REPORT_DIR = Path(".scan_reports")
+SCAN_REPORT_ARCHIVE_MAX_FILES = 100
+
+
+def _runtime_scan_report_path(scan_id: str) -> Path:
+    return SCAN_RUNTIME_REPORT_DIR / scan_id / "scan_report.json"
+
+
+def _archive_scan_report_path(scan_id: str) -> Path:
+    return SCAN_REPORT_ARCHIVE_DIR / f"scan_report_{scan_id}.json"
+
+
+def _prune_report_archive(max_files: int = SCAN_REPORT_ARCHIVE_MAX_FILES) -> None:
+    report_files = sorted(
+        SCAN_REPORT_ARCHIVE_DIR.glob("scan_report_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old_file in report_files[max_files:]:
+        try:
+            old_file.unlink()
+        except OSError:
+            continue
 
 
 async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
@@ -142,6 +168,9 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     started_at = time.monotonic()
     update_scan_fields(scan_id, status="running")
     args = _build_args_from_payload(request_payload)
+    runtime_output = _runtime_scan_report_path(scan_id)
+    runtime_output.parent.mkdir(parents=True, exist_ok=True)
+    args.output = str(runtime_output)
     target_url = args.url
     scan_type = args.type
 
@@ -238,9 +267,31 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     reporter.export_to_json(args.output)
     append_scan_log(scan_id, f"리포트 파일 저장: {args.output}")
 
+    archived_output = _archive_scan_report_path(scan_id)
+    archived_output.parent.mkdir(parents=True, exist_ok=True)
+
+    from reporter.dedupe import full_report_path
+    runtime_full = full_report_path(runtime_output)
+    debug_output = Path("scan_report.json")
+    debug_full = full_report_path(debug_output)
+
+    try:
+        shutil.copy2(runtime_output, archived_output)
+        _prune_report_archive()
+    except OSError as exc:
+        append_scan_log(scan_id, f"report 디렉터리 저장 실패: {exc}")
+
+    try:
+        # 모듈 디버깅 편의를 위해 최신 결과를 고정 파일명으로도 유지한다.
+        shutil.copy2(runtime_output, debug_output)
+        if runtime_full.exists():
+            shutil.copy2(runtime_full, debug_full)
+    except OSError as exc:
+        append_scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
+
     report_json = None
     try:
-        with open(args.output, "r", encoding="utf-8") as fp:
+        with open(archived_output, "r", encoding="utf-8") as fp:
             report_json = json.load(fp)
     except (OSError, json.JSONDecodeError) as exc:
         append_scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
@@ -267,7 +318,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 "scan_type": args.type,
                 "total_requests": stats.completed,
                 "findings": len(findings),
-                "output": args.output,
+                "output": str(archived_output),
             }
         },
         report_json=report_json,
