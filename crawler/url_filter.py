@@ -10,6 +10,7 @@ import re
 import ipaddress
 import asyncio
 import os
+from collections import OrderedDict
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote
 
 from utils.logger import get_logger
@@ -18,6 +19,9 @@ logger = get_logger(__name__)
 
 
 class URLFilter:
+    # 하이브리드 크롤러 공유 visited 상한 (LRU 방식으로 오래된 항목 제거)
+    MAX_SHARED_VISITED = 50_000
+
     EXCLUDED_EXTENSIONS = {
         '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp',
         '.css', '.js', '.map',
@@ -77,7 +81,8 @@ class URLFilter:
         self.excluded_domains = set()
         self.max_url_length = max_url_length
         self.allowed_schemes = {'http', 'https'}
-
+        # 정적/동적 크롤러가 공유하는 방문 URL (OrderedDict LRU)
+        self.shared_visited: OrderedDict[str, None] = OrderedDict()
         # (path, query_key_names) -> {dom_skeleton_hash: fetch_count}
         self.dom_structure_counts: dict[tuple, dict[str, int]] = {}
         # (path, query_key_names) -> form action tokens already fully parsed
@@ -158,6 +163,74 @@ class URLFilter:
             return False
         except Exception as e:
             logger.debug(f"안전성 검증 실패 ({url}): {e}")
+            return False
+
+    def mark_visited(self, url: str) -> bool:
+        """
+        정적/동적 크롤러가 공유하는 visited에 정규화된 URL을 추가.
+        반환값: True면 신규 방문(=처리해야 함), False면 이미 다른 엔진이 방문.
+        """
+        try:
+            key = self.normalize_url(url)
+        except Exception:
+            key = url
+        if key in self.shared_visited:
+            self.shared_visited.move_to_end(key)
+            return False
+        self.shared_visited[key] = None
+        while len(self.shared_visited) > self.MAX_SHARED_VISITED:
+            self.shared_visited.popitem(last=False)
+        return True
+
+    def is_visited(self, url: str) -> bool:
+        try:
+            key = self.normalize_url(url)
+        except Exception:
+            key = url
+        return key in self.shared_visited
+
+    def is_crawlable(self, url: str) -> bool:
+        """
+        순수 판정만 수행 (url_structure_counts 증가 없음).
+        SPA/하이브리드에서 should_crawl을 반복 호출할 때 정적 크롤러 한도를 소모하지 않도록 사용.
+        """
+        return self._evaluate_crawl_rules(url, count_structure=False)
+
+    def _evaluate_crawl_rules(self, url: str, *, count_structure: bool = False) -> bool:
+        """
+        Shared crawl eligibility check for static and SPA crawlers.
+
+        count_structure is kept for compatibility with older call sites; the
+        current DOM-structure quota is enforced after fetch/parse time.
+        """
+        try:
+            parsed = urlparse(url)
+            path = parsed.path.lower()
+
+            if parsed.scheme not in self.allowed_schemes:
+                return False
+
+            if len(url) > self.max_url_length:
+                return False
+
+            if not self._is_domain_allowed(parsed.netloc):
+                return False
+
+            # DVWA: never crawl security.php on any host (avoids toggling session difficulty).
+            if path.endswith("/security.php"):
+                return False
+
+            if self._has_excluded_extension(parsed.path):
+                return False
+
+            if self._matches_excluded_pattern(url):
+                return False
+
+            # DOM structure limits are applied after FETCH+parse (see CrawlerEngine).
+            return True
+
+        except Exception as e:
+            logger.warning("URL 필터링 오류 (%s): %s", url, e)
             return False
 
     @staticmethod
@@ -244,35 +317,7 @@ class URLFilter:
 
     def should_crawl(self, url: str) -> bool:
         """Static filters + structure quota check. Does not consume structure quota."""
-        try:
-            parsed = urlparse(url)
-            path = parsed.path.lower()
-
-            if parsed.scheme not in self.allowed_schemes:
-                return False
-
-            if len(url) > self.max_url_length:
-                return False
-
-            if not self._is_domain_allowed(parsed.netloc):
-                return False
-
-            # DVWA: never crawl security.php on any host (avoids toggling session difficulty).
-            if path.endswith("/security.php"):
-                return False
-
-            if self._has_excluded_extension(parsed.path):
-                return False
-
-            if self._matches_excluded_pattern(url):
-                return False
-
-            # DOM structure limits are applied after FETCH+parse (see CrawlerEngine).
-            return True
-
-        except Exception as e:
-            logger.warning("URL 필터링 오류 (%s): %s", url, e)
-            return False
+        return self._evaluate_crawl_rules(url, count_structure=False)
 
     def _is_domain_allowed(self, domain: str) -> bool:
         if domain in self.excluded_domains:
@@ -324,7 +369,10 @@ class URLFilter:
                         query_list.append((k, v))
                 query = urlencode(query_list, doseq=True)
 
-            return urlunparse((scheme, netloc, path, '', query, ''))
+            fragment = parsed.fragment
+            if fragment and not (fragment.startswith('/') or fragment.startswith('!')):
+                fragment = ''
+            return urlunparse((scheme, netloc, path, '', query, fragment))
         # noinspection PyBroadException
         except Exception as e:
             logger.debug("URL 정규화 실패 (%s): %s", url, e)

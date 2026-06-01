@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -18,7 +18,8 @@ from cli.options import parse_bf_length, parse_cookies
 from cli.runner import prepare_scan_context
 from cli.surfaces import resolve_surfaces
 from fuzzer import FuzzerEngine
-from fuzzer.request_builder import build_and_send_request
+from fuzzer.auth_provider import scan_auth_lifecycle
+from fuzzer.request_builder import build_and_send_request, set_graphql_safe_mode
 from reporter import ReportGenerator
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
 from reporter.generator import _finding_sort_key
@@ -53,6 +54,20 @@ class AuthSettings(BaseModel):
     password_field: str = "password"
     csrf_field: str = "user_token"
     submit_field: str = "Login"
+    login_json: bool = False
+    login_body_format: Literal["auto", "form", "json"] = "auto"
+
+
+class CrawlerOptions(BaseModel):
+    crawl_mode: Literal["static", "dynamic", "hybrid"] = "hybrid"
+    spa_max_routes: int = Field(default=50, ge=1, le=500)
+    unsafe_click: bool = False
+    local_storage: str = "{}"
+    exclude_urls: list[str] = Field(default_factory=list)
+    fuzz_csrf: bool = False
+    fuzz_auth: bool = False
+    graphql_unsafe: bool = False
+    exclude_auth_paths: list[str] = Field(default_factory=list)
 
 
 class EngineOptions(BaseModel):
@@ -137,6 +152,7 @@ class ScanRequest(BaseModel):
     ] = "all"
     level: int = Field(default=1, ge=0, le=3)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    crawler: CrawlerOptions = Field(default_factory=CrawlerOptions)
     engine: EngineOptions = Field(default_factory=EngineOptions)
     sqli: SQLiOptions = Field(default_factory=SQLiOptions)
     osci: OSCiOptions = Field(default_factory=OSCiOptions)
@@ -187,6 +203,9 @@ async def get_schema() -> dict:
             "oob_retries": 3,
             "oob_poll_delay": 5.0,
             "oob_poll_timeout": 10.0,
+            "crawl_mode": "hybrid",
+            "spa_max_routes": 50,
+            "local_storage": "{}",
         },
     }
 
@@ -235,6 +254,44 @@ async def get_scan(scan_id: str) -> dict:
     return scan
 
 
+def _resolve_login_body_format(auth: AuthSettings) -> str:
+    if auth.login_json:
+        return "json"
+    return auth.login_body_format
+
+
+def _apply_spa_runtime_options(
+    args: Namespace,
+    *,
+    on_warning: Callable[[str], None] | None = None,
+) -> None:
+    """CLI main.py와 동일한 SPA/GraphQL 런타임 설정."""
+    if getattr(args, "graphql_unsafe", False):
+        if on_warning:
+            on_warning(
+                "GraphQL unsafe mode: mutations will be attacked; "
+                "server/database state may change."
+            )
+        set_graphql_safe_mode(False)
+    else:
+        set_graphql_safe_mode(True)
+    if getattr(args, "unsafe_click", False) and on_warning:
+        on_warning(
+            "SPA unsafe click: non-submit UI buttons may be clicked "
+            "(higher coverage; logout/session loss risk)."
+        )
+    if getattr(args, "fuzz_csrf", False) and on_warning:
+        on_warning(
+            "CSRF fuzzing: dynamic-token surfaces will be attacked "
+            "(slower; may invalidate sessions)."
+        )
+    if getattr(args, "fuzz_auth", False) and on_warning:
+        on_warning(
+            "Auth endpoint fuzzing: login/token surfaces will be attacked "
+            "(may invalidate sessions or lock accounts)."
+        )
+
+
 def _build_cli_args(req: ScanRequest) -> Namespace:
     bf_min_length = req.bruteforce.bf_min_length
     bf_max_length = req.bruteforce.bf_max_length
@@ -251,6 +308,8 @@ def _build_cli_args(req: ScanRequest) -> Namespace:
     ssrf_evasion_level = min(level, 2)
     sxss_evasion_level = level
     rxss_evasion_level = req.reflected_xss.evasion_level
+    crawler = req.crawler
+    login_body_format = _resolve_login_body_format(req.auth)
 
     return Namespace(
         # Core scan options
@@ -264,11 +323,23 @@ def _build_cli_args(req: ScanRequest) -> Namespace:
         password_field=req.auth.password_field,
         csrf_field=req.auth.csrf_field,
         submit_field=req.auth.submit_field,
+        login_json=req.auth.login_json,
+        login_body_format=login_body_format,
         output=req.engine.output,
         surfaces_output=req.engine.surfaces_output,
         type=req.scan_type,
         session_pool_size=req.engine.session_pool_size,
         level=level,
+        # SPA / crawler
+        crawl_mode=crawler.crawl_mode,
+        spa_max_routes=crawler.spa_max_routes,
+        local_storage=crawler.local_storage,
+        unsafe_click=crawler.unsafe_click,
+        exclude_urls=list(crawler.exclude_urls),
+        fuzz_csrf=crawler.fuzz_csrf,
+        fuzz_auth=crawler.fuzz_auth,
+        graphql_unsafe=crawler.graphql_unsafe,
+        exclude_auth_paths=list(crawler.exclude_auth_paths),
         # Bruteforce options
         bf_wordlist=req.bruteforce.bf_wordlist,
         bf_disable_mutation=req.bruteforce.bf_disable_mutation,
@@ -355,9 +426,13 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
 
     try:
         args = _build_cli_args(req)
+        _apply_spa_runtime_options(args, on_warning=lambda msg: _scan_log(scan, f"[WARNING] {msg}"))
         if args.type == "oob":
             _scan_log(scan, f"OAST 서버: {args.oob_server}")
-        _scan_log(scan, "CLI 인자 구성 완료")
+        _scan_log(
+            scan,
+            f"CLI 인자 구성 완료 (crawl_mode={args.crawl_mode}, spa_max_routes={args.spa_max_routes})",
+        )
         cookies = parse_cookies(args.cookie) if args.cookie else {}
         _scan_log(scan, "공격면 수집 시작")
         surfaces = await resolve_surfaces(args, base_url=args.url, cookies=cookies)
@@ -395,54 +470,56 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
         next_completed_log_milestone = (
             SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
         )
-        scan_task = asyncio.create_task(
-            engine.run_with_attack_modules(
-                surfaces=surfaces,
-                request_sender=_request_sender,
-            )
-        )
 
-        while not scan_task.done():
-            planned_total = total_requests
-            queued_total = engine.stats.queued
-            effective_total = max(planned_total, queued_total, 1)
-            completed = engine.stats.completed
-            progress_pct = min(
-                100.0,
-                round(completed / effective_total * 100, 1),
-            )
-            if not scan_task.done() and progress_pct >= 99.9:
-                progress_pct = 99.9
-            scan["progress_percent"] = progress_pct
-            scan["progress"] = int(progress_pct)
-            scan["summary"] = {
-                "queued": queued_total,
-                "completed": completed,
-                "failures": engine.stats.failures,
-                "findings": engine.stats.findings,
-                "elapsed_time": round(time.monotonic() - started_at, 2),
-                "total_requests": effective_total,
-                "planned_requests": planned_total,
-            }
-            scan["updated_at"] = time.time()
-            if progress_pct != last_logged_progress:
-                _scan_log(
-                    scan,
-                    f"진행률 {progress_pct}% (completed={engine.stats.completed}, findings={engine.stats.findings}, failures={engine.stats.failures})",
+        async with scan_auth_lifecycle(args, base_cookies=cookies):
+            scan_task = asyncio.create_task(
+                engine.run_with_attack_modules(
+                    surfaces=surfaces,
+                    request_sender=_request_sender,
                 )
-                last_logged_progress = progress_pct
-            if bf_true_random_milestone_logs:
-                completed_now = engine.stats.completed
-                while completed_now >= next_completed_log_milestone:
+            )
+
+            while not scan_task.done():
+                planned_total = total_requests
+                queued_total = engine.stats.queued
+                effective_total = max(planned_total, queued_total, 1)
+                completed = engine.stats.completed
+                progress_pct = min(
+                    100.0,
+                    round(completed / effective_total * 100, 1),
+                )
+                if not scan_task.done() and progress_pct >= 99.9:
+                    progress_pct = 99.9
+                scan["progress_percent"] = progress_pct
+                scan["progress"] = int(progress_pct)
+                scan["summary"] = {
+                    "queued": queued_total,
+                    "completed": completed,
+                    "failures": engine.stats.failures,
+                    "findings": engine.stats.findings,
+                    "elapsed_time": round(time.monotonic() - started_at, 2),
+                    "total_requests": effective_total,
+                    "planned_requests": planned_total,
+                }
+                scan["updated_at"] = time.time()
+                if progress_pct != last_logged_progress:
                     _scan_log(
                         scan,
-                        f"[true-random BF] 누적 요청 완료 {next_completed_log_milestone}건 "
-                        f"(queued={engine.stats.queued}, findings={engine.stats.findings}, failures={engine.stats.failures})",
+                        f"진행률 {progress_pct}% (completed={engine.stats.completed}, findings={engine.stats.findings}, failures={engine.stats.failures})",
                     )
-                    next_completed_log_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
-            await asyncio.sleep(0.3)
+                    last_logged_progress = progress_pct
+                if bf_true_random_milestone_logs:
+                    completed_now = engine.stats.completed
+                    while completed_now >= next_completed_log_milestone:
+                        _scan_log(
+                            scan,
+                            f"[true-random BF] 누적 요청 완료 {next_completed_log_milestone}건 "
+                            f"(queued={engine.stats.queued}, findings={engine.stats.findings}, failures={engine.stats.failures})",
+                        )
+                        next_completed_log_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
+                await asyncio.sleep(0.3)
 
-        stats = await scan_task
+            stats = await scan_task
         reporter = ReportGenerator(stats=stats, findings=engine.findings)
         reporter.export_to_json(args.output)
         _scan_log(scan, f"리포트 파일 저장 완료: {args.output}")

@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import json
 import logging
 from typing import Dict, List, Optional, Union, Any
 from typing_extensions import TypedDict, NotRequired
@@ -14,12 +15,10 @@ RISK_KEYWORDS = {
     'medium': frozenset({'email', 'user', 'card', 'config'})
 }
 
-
 class CSRFTokenInfo(TypedDict):
     name: str
     value: str
     type: str
-
 
 class FormInfo(TypedDict):
     type: str
@@ -33,13 +32,24 @@ class FormInfo(TypedDict):
     csrf_token: NotRequired[Optional[CSRFTokenInfo]]
     is_file_upload: NotRequired[bool]
     risk_level: NotRequired[str]
-
+    data_content_type: NotRequired[str]
+    data_orig_method: NotRequired[str]
+    data_graphql_type: NotRequired[str]
+    data_graphql_op: NotRequired[str]
+    data_graphql_arg_types: NotRequired[str]
+    data_source_kind: NotRequired[str]
+    data_route_context: NotRequired[str]
+    data_source_url: NotRequired[str]
+    data_response_headers: NotRequired[str]
+    data_server_info: NotRequired[str]
+    data_response_content_type: NotRequired[str]
+    data_inferred: NotRequired[str]
+    data_depth: NotRequired[str]
 
 def _get_attr_str(tag, attr: str, default: str = "") -> str:
     """BeautifulSoup의 list/str 속성 불일치 해결"""
     val = tag.get(attr, default)
     return " ".join(val) if isinstance(val, list) else str(val)
-
 
 def _get_limited_raw_html(tag, max_bytes: int = 10240) -> str:
     """바이트 단위 안전 절삭"""
@@ -48,7 +58,6 @@ def _get_limited_raw_html(tag, max_bytes: int = 10240) -> str:
     if len(raw_bytes) <= max_bytes:
         return raw_html
     return raw_bytes[:max_bytes].decode('utf-8', errors='ignore') + "..."
-
 
 def extract_forms(
         html: Union[str, BeautifulSoup],
@@ -68,6 +77,21 @@ def extract_forms(
             action = urljoin(base_url, action_raw) if base_url else action_raw
             method = _get_attr_str(form, 'method', 'get').lower()
             enctype = _get_attr_str(form, 'enctype', 'application/x-www-form-urlencoded').lower()
+
+            # SPA 크롤러가 주입한 커스텀 메타데이터 추출
+            data_content_type = _get_attr_str(form, 'data-content-type')
+            data_orig_method = _get_attr_str(form, 'data-original-method')
+            data_graphql_type = _get_attr_str(form, 'data-graphql-type')
+            data_graphql_op = _get_attr_str(form, 'data-graphql-operation')
+            data_graphql_arg_types = _get_attr_str(form, 'data-graphql-arg-types')
+            data_source_kind = _get_attr_str(form, 'data-source-kind')
+            data_route_context = _get_attr_str(form, 'data-route-context')
+            data_source_url = _get_attr_str(form, 'data-source-url')
+            data_response_headers = _get_attr_str(form, 'data-response-headers')
+            data_server_info = _get_attr_str(form, 'data-server-info')
+            data_response_content_type = _get_attr_str(form, 'data-response-content-type')
+            data_inferred = _get_attr_str(form, 'data-inferred')
+            data_depth = _get_attr_str(form, 'data-depth')
 
             # 2. 파라미터 수집
             params: Dict[str, Any] = {}
@@ -110,9 +134,9 @@ def extract_forms(
                     params[name] = val
 
             # 3. 보안 분석 (개선 사항 반영)
-            csrf_info: Optional[CSRFTokenInfo] = None  # 타입 명시 반영
+            csrf_info: Optional[CSRFTokenInfo] = None
             param_names_lower = [str(k).lower() for k in params.keys()]
-            param_str = " ".join(param_names_lower)  # Join 미리 수행 (효율화 반영)
+            param_str = " ".join(param_names_lower)
 
             # CSRF 탐지
             for p_name, p_val in params.items():
@@ -134,6 +158,19 @@ def extract_forms(
                 'action': action,
                 'method': method if method in ('get', 'post', 'put', 'delete', 'patch') else 'get',
                 'enctype': enctype,
+                'data_content_type': data_content_type,
+                'data_orig_method': data_orig_method,
+                'data_graphql_type': data_graphql_type,
+                'data_graphql_op': data_graphql_op,
+                'data_graphql_arg_types': data_graphql_arg_types,
+                'data_source_kind': data_source_kind,
+                'data_route_context': data_route_context,
+                'data_source_url': data_source_url,
+                'data_response_headers': data_response_headers,
+                'data_server_info': data_server_info,
+                'data_response_content_type': data_response_content_type,
+                'data_inferred': data_inferred,
+                'data_depth': data_depth,
                 'parameters': params,
                 'has_csrf_token': csrf_info is not None,
                 'raw_html': _get_limited_raw_html(form),

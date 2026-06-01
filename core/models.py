@@ -136,6 +136,8 @@ class AttackSurface:
     description: str | None = None
     depth: int = 0
     content_type: str | None = None
+    graphql_arg_types: Dict[str, str] = field(default_factory=dict)
+    parameter_confidence: Dict[str, str] = field(default_factory=dict)
 
     def get_id(self) -> str:
         """고유 식별자 생성"""
@@ -158,6 +160,8 @@ class AttackSurface:
             'description': self.description,
             'depth': self.depth,
             'content_type': self.content_type,
+            'graphql_arg_types': self.graphql_arg_types,
+            'parameter_confidence': self.parameter_confidence,
         }
 
     @classmethod
@@ -175,6 +179,8 @@ class AttackSurface:
             description=data.get('description'),
             depth=data.get('depth', 0),
             content_type=data.get('content_type'),
+            graphql_arg_types=_normalize_graphql_arg_types(data.get('graphql_arg_types', {})),
+            parameter_confidence=_normalize_parameter_confidence(data.get('parameter_confidence', {})),
         )
 
 
@@ -350,3 +356,24 @@ def _normalize_dynamic_tokens(raw_tokens: Any) -> Dict[str, str]:
                 normalized[str(key)] = str(value)
         return normalized
     return {}
+
+
+def _normalize_graphql_arg_types(raw_arg_types: Any) -> Dict[str, str]:
+    if isinstance(raw_arg_types, dict):
+        return {str(k): str(v) for k, v in raw_arg_types.items()}
+    return {}
+
+
+def _normalize_parameter_confidence(raw_confidence: Any) -> Dict[str, str]:
+    if not isinstance(raw_confidence, dict):
+        return {}
+    normalized: Dict[str, str] = {}
+    for raw_key, raw_level in raw_confidence.items():
+        key = str(raw_key).strip()
+        level = str(raw_level).strip().lower()
+        if not key:
+            continue
+        if level not in {"high", "medium", "low"}:
+            continue
+        normalized[key] = level
+    return normalized

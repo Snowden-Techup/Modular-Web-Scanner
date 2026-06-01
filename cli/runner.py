@@ -5,6 +5,8 @@ import os
 
 from cli.output import print_scan_configuration, progress_printer
 from fuzzer import FuzzerEngine
+from cli.options import parse_cookies
+from fuzzer.auth_provider import scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request
 from fuzzer.setup import count_module_payloads, estimate_total_requests, select_modules
 from reporter import ReportGenerator
@@ -60,7 +62,7 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
         module_count=len(context["modules"]),
         payload_count=context["payload_count"],
         level=args.level,
-        target_dbms=args.target_dbms, 
+        target_dbms=args.target_dbms,
         target_os=args.target_os,
         sqli_evasion_level=args.sqli_evasion_level,
         osci_evasion_level=args.osci_evasion_level,
@@ -87,17 +89,19 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
         delay=context["delay"],
     )
 
-    scan_task = asyncio.create_task(
-        engine.run_with_attack_modules(
-            surfaces=surfaces,
-            request_sender=_request_sender,
+    scan_cookies = parse_cookies(args.cookie) if getattr(args, "cookie", "") else {}
+    async with scan_auth_lifecycle(args, base_cookies=scan_cookies):
+        scan_task = asyncio.create_task(
+            engine.run_with_attack_modules(
+                surfaces=surfaces,
+                request_sender=_request_sender,
+            )
         )
-    )
-    progress_task = asyncio.create_task(
-        progress_printer(engine, context["total_requests"], scan_task)
-    )
-    stats = await scan_task
-    await progress_task
+        progress_task = asyncio.create_task(
+            progress_printer(engine, context["total_requests"], scan_task)
+        )
+        stats = await scan_task
+        await progress_task
 
     reporter = ReportGenerator(stats=stats, findings=engine.findings)
     reporter.print_cli_report()
