@@ -665,11 +665,24 @@
       word-break: break-all;
       line-height: 1.45;
     }
-    .report-summary-row {
-      font-size: 0.74rem;
-      color: #64748b;
-      margin-bottom: 10px;
+    .report-findings-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .finding-count-badge {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      border-radius: 999px;
+      padding: 2px 10px;
+      line-height: 1.35;
       font-family: "JetBrains Mono", monospace;
+    }
+    .finding-count-badge[hidden] {
+      display: none;
     }
 
     .scan-history-box {
@@ -1260,7 +1273,10 @@
 
       <div class="report-box">
         <div class="section-header" style="padding:0 0 8px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">
-          <span>발견 내역</span>
+          <span class="report-findings-title">
+            발견 내역
+            <span id="findingCountBadge" class="finding-count-badge" hidden></span>
+          </span>
           <span class="hint" id="reportScanId">scan_id: (없음)</span>
         </div>
         <div id="findingList" class="report-list">
@@ -1293,6 +1309,7 @@
     const reportTarget = document.getElementById("reportTarget");
     const reportFindings = document.getElementById("reportFindings");
     const reportScanId = document.getElementById("reportScanId");
+    const findingCountBadge = document.getElementById("findingCountBadge");
     const findingList = document.getElementById("findingList");
     const scanHistoryList = document.getElementById("scanHistoryList");
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
@@ -1653,6 +1670,17 @@
       return req.scan_type || req.type || "-";
     }
 
+    function setFindingCount(count) {
+      if (!findingCountBadge) return;
+      if (count == null || Number.isNaN(Number(count)) || Number(count) < 0) {
+        findingCountBadge.hidden = true;
+        findingCountBadge.textContent = "";
+        return;
+      }
+      findingCountBadge.hidden = false;
+      findingCountBadge.textContent = `${Number(count)}건`;
+    }
+
     function renderReport(scan) {
       reportScanId.textContent  = `scan_id: ${scan.scan_id || "(없음)"}`;
       reportStatus.textContent  = scan.status || "-";
@@ -1663,22 +1691,32 @@
       const reportVulns  = scan.report_json?.vulnerabilities || [];
       const rawFindings  = scan.findings || [];
       const useGrouped   = reportVulns.length > 0 && isGroupedFormat(reportVulns);
+      const scanDone = scan.status === "completed" || scan.status === "failed";
+
+      if (!scanDone) {
+        setFindingCount(null);
+      }
 
       if (useGrouped) {
         const sum = scan.report_json?.metadata?.summary || {};
-        const deduped = sum.findings_deduped != null ? `중복제거 ${sum.findings_deduped}건` : "";
-        const raw     = sum.findings_raw     != null ? `원본 ${sum.findings_raw}건` : "";
-        const summaryLine = [deduped, raw].filter(Boolean).join(" · ");
-        findingList.innerHTML =
-          (summaryLine ? `<div class="report-summary-row">${escapeHtml(summaryLine)}</div>` : "") +
-          reportVulns.map(renderGroupCard).join("");
+        const dedupedCount = sum.findings_deduped ?? reportVulns.length;
+        if (scanDone) {
+          setFindingCount(dedupedCount);
+        }
+        findingList.innerHTML = reportVulns.map(renderGroupCard).join("");
         return;
       }
 
       const items = rawFindings.length > 0 ? rawFindings : reportVulns;
       if (!items.length) {
+        if (scanDone) {
+          setFindingCount(0);
+        }
         findingList.innerHTML = '<div class="muted">발견된 취약점이 없습니다.</div>';
         return;
+      }
+      if (scanDone) {
+        setFindingCount(items.length);
       }
       const sorted = [...items].sort((a, b) => {
         const ra = SEVERITY_SORT_ORDER[severityTier(a.attack_info?.severity ?? a.severity)] ?? 4;
@@ -1751,6 +1789,7 @@
         const data = await requestJson(`/api/scan/${scanId}`);
         renderReport(data);
       } catch (err) {
+        setFindingCount(null);
         findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;
       }
     }
@@ -1971,6 +2010,7 @@
         reportStatus.textContent = "queued";
         reportProgress.textContent = "0.0%";
         reportFindings.textContent = payload.scan_type || "all";
+        setFindingCount(null);
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
         updateScanProgressUI({
           status: "queued",
