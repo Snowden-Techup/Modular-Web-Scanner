@@ -104,12 +104,13 @@ class _TokenExtractor(HTMLParser):
                 self.tokens[name] = content
 
 
-def _dynamic_lock_key(cookies: dict[str, Any]) -> str:
+def _dynamic_lock_key(cookies: dict[str, Any], *, lock_namespace: str | None = None) -> str:
     session_id = cookies.get("PHPSESSID")
     if session_id:
         return f"phpsessid:{session_id}"
     if not cookies:
-        return "no-cookie"
+        suffix = lock_namespace or "global"
+        return f"no-cookie:{suffix}"
     parts = [f"{k}={cookies[k]}" for k in sorted(cookies.keys())]
     return "cookie:" + "|".join(parts)
 
@@ -317,7 +318,8 @@ async def build_and_send_request(
     surface: AttackSurface,
     parameter: str,
     payload: Any,
-    allow_redirects: bool = True
+    allow_redirects: bool = True,
+    lock_namespace: str | None = None,
 ) -> FuzzerResponse:
     """
     Clone attack surface data, inject one payload, and send the HTTP request.
@@ -416,7 +418,7 @@ async def build_and_send_request(
             allow_redirects=allow_redirects,
         )
 
-    lock_key = _dynamic_lock_key(cookies)
+    lock_key = _dynamic_lock_key(cookies, lock_namespace=lock_namespace)
     token_lock = await _get_dynamic_token_lock(lock_key)
     async with token_lock:
         new_tokens = await fetch_dynamic_tokens(
@@ -482,6 +484,8 @@ async def build_and_send_request(
 async def send_baseline_request(
     session: aiohttp.ClientSession,
     surface: AttackSurface,
+    *,
+    lock_namespace: str | None = None,
 ) -> FuzzerResponse:
     """
     Send one non-injected baseline request for comparison analyzers.
@@ -514,7 +518,7 @@ async def send_baseline_request(
             request_kwargs=request_kwargs,
         )
 
-    lock_key = _dynamic_lock_key(cookies)
+    lock_key = _dynamic_lock_key(cookies, lock_namespace=lock_namespace)
     token_lock = await _get_dynamic_token_lock(lock_key)
     async with token_lock:
         new_tokens = await fetch_dynamic_tokens(

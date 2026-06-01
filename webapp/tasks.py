@@ -201,11 +201,17 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         concurrency_per_module=context["queue_workers"],
         session_pool_size=max(1, args.session_pool_size),
         delay=context["delay"],
+        dynamic_lock_namespace=scan_id,
     )
 
     async def _request_sender(session, surface, parameter, payload, allow_redirects=True):
         return await build_and_send_request(
-            session, surface, parameter, payload, allow_redirects=allow_redirects
+            session,
+            surface,
+            parameter,
+            payload,
+            allow_redirects=allow_redirects,
+            lock_namespace=scan_id,
         )
 
     total_requests = max(1, context["total_requests"])
