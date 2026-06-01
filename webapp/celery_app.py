@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+# Celery 워커는 cwd/sys.path가 uvicorn과 달라질 수 있음 — 프로젝트 루트를 항상 등록
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from celery import Celery
 

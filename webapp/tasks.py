@@ -48,7 +48,7 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     oob_server_raw = oob.get("oob_server", DEFAULT_OAST_SERVER_URL) or DEFAULT_OAST_SERVER_URL
 
     return Namespace(
-        url=payload.get("url", ""),
+        url=payload.get("url") or payload.get("target_url", ""),
         rps=int(engine.get("rps", 50)),
         cookie=auth.get("cookie", ""),
         login_url=auth.get("login_url", ""),
