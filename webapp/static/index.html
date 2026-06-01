@@ -931,11 +931,11 @@
               </div>
               <div class="col-md-3">
                 <label class="form-label" for="csrf_field">CSRF 필드명</label>
-                <input id="csrf_field" type="text" class="form-control" value="user_token">
+                <input id="csrf_field" type="text" class="form-control" value="" placeholder="없으면 비움 (DVWA: user_token)">
               </div>
               <div class="col-md-3">
                 <label class="form-label" for="submit_field">제출 필드명</label>
-                <input id="submit_field" type="text" class="form-control" value="Login">
+                <input id="submit_field" type="text" class="form-control" value="" placeholder="없으면 비움 (DVWA: Login)">
               </div>
             </div>
           </div>
@@ -1785,8 +1785,8 @@
           password: document.getElementById("password").value,
           username_field: document.getElementById("username_field").value,
           password_field: document.getElementById("password_field").value,
-          csrf_field: document.getElementById("csrf_field").value,
-          submit_field: document.getElementById("submit_field").value
+          csrf_field: document.getElementById("csrf_field").value.trim(),
+          submit_field: document.getElementById("submit_field").value.trim()
         },
         engine: {
           rps: toInt("rps", 50),

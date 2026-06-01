@@ -20,9 +20,17 @@ from webapp.db_service import (
 
 
 # ─────────────────────────────────────────
-# 스캔 요청 dict → Namespace (기존 _build_cli_args 로직과 동일)
+# 스캔 요청 dict → Namespace (CLI와 동일한 의미; DVWA 기본 CSRF/submit 미적용)
 # tasks.py 는 main.py 를 import 하지 않으므로 독립적으로 정의
 # ─────────────────────────────────────────
+def _blankable_auth_field(auth: dict, key: str) -> str:
+    """빈 문자열·공백은 '필드 없음'으로 처리 (CLI --csrf-field \"\" 와 동일)."""
+    raw = auth.get(key, "")
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
 def _build_args_from_payload(payload: dict) -> Namespace:
     from cli.options import parse_bf_length
 
@@ -49,21 +57,26 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
     oob_server_raw = oob.get("oob_server", DEFAULT_OAST_SERVER_URL) or DEFAULT_OAST_SERVER_URL
 
+    raw_url = (payload.get("url") or payload.get("target_url") or "").strip()
+    scan_url = raw_url.rstrip("/") if raw_url else ""
+
     return Namespace(
-        url=payload.get("url") or payload.get("target_url", ""),
+        url=scan_url,
         rps=int(engine.get("rps", 50)),
-        cookie=auth.get("cookie", ""),
-        login_url=auth.get("login_url", ""),
-        username=auth.get("username", ""),
-        password=auth.get("password", ""),
-        username_field=auth.get("username_field", "username"),
-        password_field=auth.get("password_field", "password"),
-        csrf_field=auth.get("csrf_field", "user_token"),
-        submit_field=auth.get("submit_field", "Login"),
+        workers=0,
+        cookie=(auth.get("cookie") or "").strip(),
+        login_url=(auth.get("login_url") or "").strip(),
+        username=(auth.get("username") or "").strip(),
+        password=auth.get("password") or "",
+        username_field=auth.get("username_field") or "username",
+        password_field=auth.get("password_field") or "password",
+        csrf_field=_blankable_auth_field(auth, "csrf_field"),
+        submit_field=_blankable_auth_field(auth, "submit_field"),
         output=engine.get("output", "scan_report.json"),
         surfaces_output=engine.get("surfaces_output", "attack_surfaces.json"),
-        type=payload.get("scan_type", "all"),
+        type=payload.get("scan_type") or payload.get("type") or "all",
         session_pool_size=int(engine.get("session_pool_size", 3)),
+        exclude_urls=list(payload.get("exclude_urls") or []),
         level=level,
         bf_wordlist=bf.get("bf_wordlist", "config/payloads/bruteforce/common_passwords.txt"),
         bf_disable_mutation=bool(bf.get("bf_disable_mutation", False)),
@@ -133,6 +146,16 @@ SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
 SCAN_REPORT_ARCHIVE_DIR = Path("report")
 SCAN_RUNTIME_REPORT_DIR = Path(".scan_reports")
 SCAN_REPORT_ARCHIVE_MAX_FILES = 100
+# 진행률 DB 동기화 최소 간격(초). 동기 커밋이 asyncio 루프를 막지 않도록 to_thread + 스로틀.
+PROGRESS_DB_SYNC_INTERVAL = 1.5
+
+
+async def _scan_log(scan_id: str, message: str) -> None:
+    await asyncio.to_thread(append_scan_log, scan_id, message)
+
+
+async def _scan_update(scan_id: str, **fields) -> None:
+    await asyncio.to_thread(update_scan_fields, scan_id, **fields)
 
 
 def _runtime_scan_report_path(scan_id: str) -> Path:
@@ -166,30 +189,38 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     from reporter import ReportGenerator
 
     started_at = time.monotonic()
-    update_scan_fields(scan_id, status="running")
+    await _scan_update(scan_id, status="running")
     args = _build_args_from_payload(request_payload)
     runtime_output = _runtime_scan_report_path(scan_id)
     runtime_output.parent.mkdir(parents=True, exist_ok=True)
     args.output = str(runtime_output)
+    args.surfaces_output = str(runtime_output.parent / "attack_surfaces.json")
     target_url = args.url
     scan_type = args.type
 
-    append_scan_log(scan_id, f"[Celery] 스캔 시작: target={target_url}, type={scan_type}")
+    await _scan_log(scan_id, f"[Celery] 스캔 시작: target={target_url}, type={scan_type}")
+    if args.login_url:
+        await _scan_log(
+            scan_id,
+            "로그인: "
+            f"url={args.login_url}, user={args.username_field}, "
+            f"csrf={args.csrf_field or '(없음)'}, submit={args.submit_field or '(없음)'}",
+        )
 
     if args.type == "oob":
-        append_scan_log(scan_id, f"OAST 서버: {args.oob_server}")
+        await _scan_log(scan_id, f"OAST 서버: {args.oob_server}")
 
     cookies = parse_cookies(args.cookie) if args.cookie else {}
-    append_scan_log(scan_id, "공격면 수집 시작")
+    await _scan_log(scan_id, "공격면 수집 시작")
     surfaces = await resolve_surfaces(args, base_url=args.url, cookies=cookies)
     if not surfaces:
         raise RuntimeError("No attack surfaces resolved from target.")
-    append_scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
+    await _scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
 
     context = prepare_scan_context(args, surfaces)
     if context is None:
         raise RuntimeError("Scan context preparation failed.")
-    append_scan_log(
+    await _scan_log(
         scan_id,
         f"스캔 컨텍스트 구성 완료 (modules={len(context['modules'])}, total_requests={context['total_requests']})",
     )
@@ -215,9 +246,10 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         )
 
     total_requests = max(1, context["total_requests"])
-    update_scan_fields(scan_id, total_requests=total_requests)
+    await _scan_update(scan_id, total_requests=total_requests)
 
     last_logged_progress = -1.0
+    last_db_sync_at = 0.0
     bf_true_random_milestone_logs = args.type == "bruteforce" and bool(getattr(args, "bf_true_random", False))
     next_milestone = SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
 
@@ -242,15 +274,20 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             "total_requests": effective_total,
             "planned_requests": total_requests,
         }
-        update_scan_fields(
-            scan_id,
-            progress_percent=progress_pct,
-            progress=int(progress_pct),
-            summary=summary,
-        )
 
-        if progress_pct != last_logged_progress:
-            append_scan_log(
+        now = time.monotonic()
+        progress_changed = progress_pct != last_logged_progress
+        if progress_changed or (now - last_db_sync_at) >= PROGRESS_DB_SYNC_INTERVAL:
+            await _scan_update(
+                scan_id,
+                progress_percent=progress_pct,
+                progress=int(progress_pct),
+                summary=summary,
+            )
+            last_db_sync_at = now
+
+        if progress_changed:
+            await _scan_log(
                 scan_id,
                 f"진행률 {progress_pct}% (completed={engine.stats.completed}, "
                 f"findings={engine.stats.findings}, failures={engine.stats.failures})",
@@ -259,7 +296,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
 
         if bf_true_random_milestone_logs:
             while engine.stats.completed >= next_milestone:
-                append_scan_log(
+                await _scan_log(
                     scan_id,
                     f"[true-random BF] 누적 완료 {next_milestone}건 "
                     f"(queued={engine.stats.queued}, findings={engine.stats.findings})",
@@ -270,8 +307,8 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
 
     stats = await scan_task
     reporter = ReportGenerator(stats=stats, findings=engine.findings)
-    reporter.export_to_json(args.output)
-    append_scan_log(scan_id, f"리포트 파일 저장: {args.output}")
+    await asyncio.to_thread(reporter.export_to_json, args.output)
+    await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
 
     archived_output = _archive_scan_report_path(scan_id)
     archived_output.parent.mkdir(parents=True, exist_ok=True)
@@ -282,29 +319,32 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     debug_full = full_report_path(debug_output)
 
     try:
-        shutil.copy2(runtime_output, archived_output)
-        _prune_report_archive()
+        await asyncio.to_thread(shutil.copy2, runtime_output, archived_output)
+        await asyncio.to_thread(_prune_report_archive)
     except OSError as exc:
-        append_scan_log(scan_id, f"report 디렉터리 저장 실패: {exc}")
+        await _scan_log(scan_id, f"report 디렉터리 저장 실패: {exc}")
 
     try:
         # 모듈 디버깅 편의를 위해 최신 결과를 고정 파일명으로도 유지한다.
-        shutil.copy2(runtime_output, debug_output)
+        await asyncio.to_thread(shutil.copy2, runtime_output, debug_output)
         if runtime_full.exists():
-            shutil.copy2(runtime_full, debug_full)
+            await asyncio.to_thread(shutil.copy2, runtime_full, debug_full)
     except OSError as exc:
-        append_scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
+        await _scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
 
     report_json = None
     try:
-        with open(archived_output, "r", encoding="utf-8") as fp:
-            report_json = json.load(fp)
+        def _load_report() -> dict:
+            with open(archived_output, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+
+        report_json = await asyncio.to_thread(_load_report)
     except (OSError, json.JSONDecodeError) as exc:
-        append_scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
+        await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
     findings = _serialize_findings(engine.findings)
     final_total = max(total_requests, stats.queued, stats.completed, 1)
-    update_scan_fields(
+    await _scan_update(
         scan_id,
         status="completed",
         progress=100,
@@ -331,11 +371,11 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         error=None,
     )
 
-    scan_pk = get_scan_pk(scan_id)
+    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
-        replace_scan_findings(scan_pk, findings)
+        await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
 
-    append_scan_log(scan_id, "[Celery] 스캔 완료")
+    await _scan_log(scan_id, "[Celery] 스캔 완료")
 
 
 class _ScanTask(Task):

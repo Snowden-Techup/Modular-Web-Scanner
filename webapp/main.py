@@ -62,8 +62,8 @@ class AuthSettings(BaseModel):
     password: str = ""
     username_field: str = "username"
     password_field: str = "password"
-    csrf_field: str = "user_token"
-    submit_field: str = "Login"
+    csrf_field: str = ""
+    submit_field: str = ""
 
 
 class EngineOptions(BaseModel):

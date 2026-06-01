@@ -471,7 +471,13 @@ class FuzzerEngine:
                         )
                         for parameter, payload in batch
                     ]
-                    await asyncio.gather(*tasks, return_exceptions=False)
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, Exception):
+                            print(
+                                f"[worker:{worker_id}][{module.name}] "
+                                f"batch task failed: {result}"
+                            )
             finally:
                 queue.task_done()
 
