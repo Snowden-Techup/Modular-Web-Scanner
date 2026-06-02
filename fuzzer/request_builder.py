@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import re
 import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -12,8 +14,10 @@ import aiohttp
 
 from core.models import AttackSurface, ParamLocation
 
+from fuzzer.auth_provider import ScanAuthProvider
 
 _DYNAMIC_TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
+_auth_provider: ScanAuthProvider | None = None
 _DYNAMIC_TOKEN_LOCKS_GUARD = asyncio.Lock()
 _HOP_BY_HOP_OR_RESPONSE_HEADERS = {
     "content-length",
@@ -57,6 +61,128 @@ _CRAWLED_RESPONSE_METADATA_HEADERS = frozenset(
 )
 
 _HEADERS_STRIP_FROM_OUTBOUND = _HOP_BY_HOP_OR_RESPONSE_HEADERS | _CRAWLED_RESPONSE_METADATA_HEADERS
+
+# GraphQL Safe Mode: True이면 Mutation 공격을 스킵.
+# CLI/Web에서 set_graphql_safe_mode()로 토글한다.
+_GRAPHQL_SAFE_MODE: bool = True
+
+
+def set_auth_provider(provider: ScanAuthProvider | None) -> None:
+    """퍼징 요청마다 적용할 인증 provider (Bearer 갱신·재로그인)."""
+    global _auth_provider
+    _auth_provider = provider
+
+
+def get_auth_provider() -> ScanAuthProvider | None:
+    return _auth_provider
+
+
+def set_graphql_safe_mode(enabled: bool) -> None:
+    """
+    GraphQL Mutation 공격 허용 여부를 설정한다.
+    - enabled=True  : 기본. Mutation은 스킵 (DB/상태 변경 방지)
+    - enabled=False : Mutation도 공격 (--graphql-unsafe 옵션)
+    """
+    global _GRAPHQL_SAFE_MODE
+    _GRAPHQL_SAFE_MODE = bool(enabled)
+
+
+def _should_skip_graphql_mutation(gql_type: str) -> bool:
+    return _GRAPHQL_SAFE_MODE and gql_type.lower() == "mutation"
+
+
+def _parse_graphql_surface(surface: AttackSurface) -> tuple[str, str] | None:
+    desc = surface.description or ""
+    if "GraphQL:" not in desc:
+        return None
+    try:
+        _, gql_type, op_name = desc.split(":", 2)
+        return gql_type, op_name
+    except ValueError:
+        return "query", "unknown"
+
+
+def _format_graphql_literal(value: Any, type_name: str | None = None) -> str:
+    """GraphQL 인자 리터럴 — introspection 타입 힌트 우선, 없으면 값 추론."""
+    if value is None:
+        return "null"
+
+    if type_name:
+        base = type_name.rstrip("!").strip()
+        if base.startswith("[") and base.endswith("]"):
+            inner = base[1:-1].rstrip("!")
+            return f"[{_format_graphql_literal(value, inner)}]"
+        if base in ("Int", "ID"):
+            text = str(value).strip()
+            if re.fullmatch(r"-?\d+", text):
+                return text
+            return "0"
+        if base == "Float":
+            text = str(value).strip()
+            if re.fullmatch(r"-?\d+(\.\d+)?", text):
+                return text
+            return "0.0"
+        if base == "Boolean":
+            text = str(value).strip().lower()
+            if text in ("true", "1", "yes"):
+                return "true"
+            if text in ("false", "0", "no"):
+                return "false"
+            return "false"
+        if base in ("String", "Date", "DateTime", "UUID", "JSON"):
+            return json.dumps(str(value))
+        # InputObject / enum 등 — 문자열로 전송
+        return json.dumps(str(value))
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+
+    text = str(value).strip()
+    if not text:
+        return '""'
+    lower = text.lower()
+    if lower in ("true", "false"):
+        return lower
+    if lower == "null":
+        return "null"
+    if re.fullmatch(r"-?\d+", text):
+        return text
+    if re.fullmatch(r"-?\d+\.\d+", text):
+        return text
+    return json.dumps(text)
+
+
+def _build_graphql_operation_query(
+        gql_type: str,
+        op_name: str,
+        params: dict[str, Any],
+        *,
+        attack_parameter: str | None = None,
+        attack_value: str | None = None,
+        arg_types: dict[str, str] | None = None,
+) -> str:
+    """
+    introspection/폼에서 수집한 모든 인자를 포함해 GraphQL operation 문자열 생성.
+    attack_parameter가 지정되면 해당 키만 attack_value로 치환한다.
+    """
+    op_kind = "mutation" if gql_type.lower() == "mutation" else "query"
+    type_map = arg_types or {}
+    arg_parts: list[str] = []
+    for key, val in params.items():
+        gql_type_name = type_map.get(str(key))
+        if attack_parameter is not None and key == attack_parameter:
+            literal = _format_graphql_literal(attack_value, gql_type_name)
+        else:
+            literal = _format_graphql_literal(val, gql_type_name)
+        arg_parts.append(f"{key}: {literal}")
+
+    if arg_parts:
+        return f"{op_kind} {{ {op_name}({', '.join(arg_parts)}) {{ __typename }} }}"
+    return f"{op_kind} {{ {op_name} {{ __typename }} }}"
 
 
 @dataclass(slots=True)
@@ -124,11 +250,11 @@ async def _get_dynamic_token_lock(lock_key: str) -> asyncio.Lock:
 
 
 async def fetch_dynamic_tokens(
-    session: aiohttp.ClientSession,
-    surface: AttackSurface,
-    *,
-    headers_override: dict[str, Any] | None = None,
-    cookies_override: dict[str, Any] | None = None,
+        session: aiohttp.ClientSession,
+        surface: AttackSurface,
+        *,
+        headers_override: dict[str, Any] | None = None,
+        cookies_override: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     dynamic_tokens = getattr(surface, "dynamic_tokens", None) or {}
     token_targets = {str(token) for token in dynamic_tokens.keys() if str(token)}
@@ -164,12 +290,12 @@ async def fetch_dynamic_tokens(
 
 
 def _apply_dynamic_tokens(
-    tokens: dict[str, str],
-    *,
-    attack_parameter: str | None,
-    req_params: dict[str, Any],
-    headers: dict[str, Any],
-    cookies: dict[str, Any],
+        tokens: dict[str, str],
+        *,
+        attack_parameter: str | None,
+        req_params: dict[str, Any],
+        headers: dict[str, Any],
+        cookies: dict[str, Any],
 ) -> None:
     for token_name, token_value in tokens.items():
         if attack_parameter is not None and token_name == attack_parameter:
@@ -183,13 +309,13 @@ def _apply_dynamic_tokens(
 
 
 def _log_dynamic_tokens(
-    *,
-    surface: AttackSurface,
-    attack_parameter: str | None,
-    tokens: dict[str, str],
-    req_params: dict[str, Any],
-    headers: dict[str, Any],
-    cookies: dict[str, Any],
+        *,
+        surface: AttackSurface,
+        attack_parameter: str | None,
+        tokens: dict[str, str],
+        req_params: dict[str, Any],
+        headers: dict[str, Any],
+        cookies: dict[str, Any],
 ) -> None:
     if not tokens:
         return
@@ -214,12 +340,22 @@ def _log_dynamic_tokens(
         )
 
 
+async def _apply_outbound_auth(
+        headers: dict[str, Any],
+        cookies: dict[str, Any],
+) -> None:
+    provider = _auth_provider
+    if provider is None:
+        return
+    await provider.apply(headers, cookies)
+
+
 async def _send_prepared_request(
-    session: aiohttp.ClientSession,
-    *,
-    method: str,
-    url: str,
-    request_kwargs: dict[str, Any],
+        session: aiohttp.ClientSession,
+        *,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
     allow_redirects: bool = True,
 ) -> FuzzerResponse:
     start_time = time.monotonic()
@@ -266,10 +402,93 @@ async def _send_prepared_request(
         )
 
 
+async def _send_with_auth_retry(
+        session: aiohttp.ClientSession,
+        *,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool = True,
+) -> FuzzerResponse:
+    headers = request_kwargs.get("headers")
+    if not isinstance(headers, dict):
+        headers = {}
+        request_kwargs["headers"] = headers
+    cookies = request_kwargs.get("cookies")
+    if not isinstance(cookies, dict):
+        cookies = {}
+        request_kwargs["cookies"] = cookies
+
+    await _apply_outbound_auth(headers, cookies)
+    response = await _send_prepared_request(
+        session,
+        method=method,
+        url=url,
+        request_kwargs=request_kwargs,
+        allow_redirects=allow_redirects,
+    )
+    provider = _auth_provider
+    if provider is None or not provider.should_retry_on(response.status):
+        return response
+    if not await provider.refresh():
+        return response
+
+    await _apply_outbound_auth(headers, cookies)
+    return await _send_prepared_request(
+        session,
+        method=method,
+        url=url,
+        request_kwargs=request_kwargs,
+        allow_redirects=allow_redirects,
+    )
+
+
 def _resolve_payload_value(payload: Any) -> str:
     if hasattr(payload, "value"):
         return str(getattr(payload, "value"))
     return str(payload)
+
+
+def _default_param_seed(name: str) -> str:
+    key = str(name or "").strip().lower()
+    if not key:
+        return "1"
+    numeric_hints = ("id", "count", "qty", "price", "amount", "number", "num", "age")
+    if any(hint in key for hint in numeric_hints):
+        return "1"
+    long_text_hints = ("content", "body", "comment", "message", "description", "desc")
+    if any(hint in key for hint in long_text_hints):
+        return "scanner-seed-content"
+    text_hints = ("title", "name", "subject", "keyword", "query", "search")
+    if any(hint in key for hint in text_hints):
+        return "scanner-seed"
+    email_hints = ("email", "mail")
+    if any(hint in key for hint in email_hints):
+        return "scan@example.com"
+    url_hints = ("url", "link", "website", "callback")
+    if any(hint in key for hint in url_hints):
+        return "https://example.com"
+    bool_hints = ("enabled", "active", "is_", "has_", "flag")
+    if any(hint in key for hint in bool_hints):
+        return "true"
+    return "scanner-seed"
+
+
+def _hydrate_empty_supporting_params(
+    params: dict[str, Any],
+    *,
+    attack_parameter: str,
+) -> None:
+    """
+    Keep injected param untouched, but seed empty sibling fields so mutating
+    endpoints can pass basic server-side required checks.
+    """
+    for key, value in list(params.items()):
+        key_str = str(key)
+        if key_str == attack_parameter:
+            continue
+        if value is None or str(value).strip() == "":
+            params[key] = _default_param_seed(key_str)
 
 
 def _sanitize_headers_for_request(headers: dict[str, Any]) -> dict[str, Any]:
@@ -313,10 +532,10 @@ def _inject_path_payload(url: str, parameter: str, payload: str) -> str:
 
 
 async def build_and_send_request(
-    session: aiohttp.ClientSession,
-    surface: AttackSurface,
-    parameter: str,
-    payload: Any,
+        session: aiohttp.ClientSession,
+        surface: AttackSurface,
+        parameter: str,
+        payload: Any,
     allow_redirects: bool = True
 ) -> FuzzerResponse:
     """
@@ -335,9 +554,9 @@ async def build_and_send_request(
     def _apply_lfi_query_url() -> None:
         nonlocal url
         if not (
-            is_lfi_payload
-            and surface.param_location == ParamLocation.QUERY
-            and req_params
+                is_lfi_payload
+                and surface.param_location == ParamLocation.QUERY
+                and req_params
         ):
             return
         split_url = urlsplit(url)
@@ -381,10 +600,33 @@ async def build_and_send_request(
             request_kwargs["data"] = form
         else:
             req_params[parameter] = payload_value
+            _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
             request_kwargs["data"] = req_params
+
+    #  JSON 및 GraphQL 직렬화 + Safe Mode 방어 (일반 요청)
     elif surface.param_location == ParamLocation.BODY_JSON:
         req_params[parameter] = payload_value
-        request_kwargs["json"] = req_params
+        _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
+
+        gql_meta = _parse_graphql_surface(surface)
+        if gql_meta is not None:
+            gql_type, op_name = gql_meta
+            if _should_skip_graphql_mutation(gql_type):
+                print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
+                return FuzzerResponse(
+                    status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                    error="Skipped by Safe Mode (GraphQL Mutation)"
+                )
+            query_str = _build_graphql_operation_query(
+                gql_type, op_name, req_params,
+                attack_parameter=parameter,
+                attack_value=payload_value,
+                arg_types=getattr(surface, "graphql_arg_types", None) or {},
+            )
+            request_kwargs["json"] = {"query": query_str}
+        else:
+            request_kwargs["json"] = req_params
+
     elif surface.param_location == ParamLocation.HEADER:
         headers[parameter] = payload_value
         if req_params:
@@ -408,7 +650,7 @@ async def build_and_send_request(
     _apply_lfi_query_url()
     dynamic_tokens = getattr(surface, "dynamic_tokens", None) or {}
     if not dynamic_tokens:
-        return await _send_prepared_request(
+        return await _send_with_auth_retry(
             session,
             method=method,
             url=url,
@@ -461,27 +703,49 @@ async def build_and_send_request(
                 request_kwargs["data"] = form
             else:
                 request_kwargs["data"] = req_params
+
+        #  JSON 및 GraphQL 직렬화 + Safe Mode 방어 (Dynamic Token이 있는 경우)
         elif surface.param_location == ParamLocation.BODY_JSON:
-            request_kwargs["json"] = req_params
+            gql_meta = _parse_graphql_surface(surface)
+            if gql_meta is not None:
+                gql_type, op_name = gql_meta
+                if _should_skip_graphql_mutation(gql_type):
+                    print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
+                    return FuzzerResponse(
+                        status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                        error="Skipped by Safe Mode (GraphQL Mutation)"
+                    )
+                query_str = _build_graphql_operation_query(
+                    gql_type, op_name, req_params,
+                    attack_parameter=parameter,
+                    attack_value=payload_value,
+                    arg_types=getattr(surface, "graphql_arg_types", None) or {},
+                )
+                request_kwargs["json"] = {"query": query_str}
+            else:
+                request_kwargs["json"] = req_params
+
         elif req_params:
             request_kwargs["params"] = req_params
+
         _apply_lfi_query_url()
         if headers:
             request_kwargs["headers"] = headers
         if cookies:
             request_kwargs["cookies"] = cookies
 
-        return await _send_prepared_request(
+        return await _send_with_auth_retry(
             session,
             method=method,
             url=url,
             request_kwargs=request_kwargs,
+            allow_redirects=allow_redirects,
         )
 
 
 async def send_baseline_request(
-    session: aiohttp.ClientSession,
-    surface: AttackSurface,
+        session: aiohttp.ClientSession,
+        surface: AttackSurface,
 ) -> FuzzerResponse:
     """
     Send one non-injected baseline request for comparison analyzers.
@@ -499,15 +763,39 @@ async def send_baseline_request(
     headers = _sanitize_headers_for_request(headers)
 
     request_kwargs: dict[str, Any] = {}
-    if req_params:
-        request_kwargs["params"] = req_params
+
+    #  Baseline 요청에도 BODY_JSON, BODY_FORM 위치를 존중하도록 개선
+    if surface.param_location == ParamLocation.BODY_JSON:
+        gql_meta = _parse_graphql_surface(surface)
+        if gql_meta is not None:
+            gql_type, op_name = gql_meta
+            if _should_skip_graphql_mutation(gql_type):
+                print(f"[Safe Mode] 스킵된 GraphQL Baseline Mutation: {op_name} (URL: {url})")
+                return FuzzerResponse(
+                    status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                    error="Skipped by Safe Mode (GraphQL Mutation)"
+                )
+            query_str = _build_graphql_operation_query(
+                gql_type, op_name, req_params,
+                arg_types=getattr(surface, "graphql_arg_types", None) or {},
+            )
+            request_kwargs["json"] = {"query": query_str}
+        else:
+            request_kwargs["json"] = req_params
+    elif surface.param_location == ParamLocation.BODY_FORM:
+        request_kwargs["data"] = req_params
+    else:
+        if req_params:
+            request_kwargs["params"] = req_params
+
     if headers:
         request_kwargs["headers"] = headers
     if cookies:
         request_kwargs["cookies"] = cookies
+
     dynamic_tokens = getattr(surface, "dynamic_tokens", None) or {}
     if not dynamic_tokens:
-        return await _send_prepared_request(
+        return await _send_with_auth_retry(
             session,
             method=method,
             url=url,
@@ -540,14 +828,36 @@ async def send_baseline_request(
                 cookies=cookies,
             )
 
-        if req_params:
-            request_kwargs["params"] = req_params
+        #  Dynamic Token 이후 Baseline 요청 전송 시 규격 통일
+        if surface.param_location == ParamLocation.BODY_JSON:
+            gql_meta = _parse_graphql_surface(surface)
+            if gql_meta is not None:
+                gql_type, op_name = gql_meta
+                if _should_skip_graphql_mutation(gql_type):
+                    print(f"[Safe Mode] 스킵된 GraphQL Baseline Mutation: {op_name} (URL: {url})")
+                    return FuzzerResponse(
+                        status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                        error="Skipped by Safe Mode (GraphQL Mutation)"
+                    )
+                query_str = _build_graphql_operation_query(
+                    gql_type, op_name, req_params,
+                    arg_types=getattr(surface, "graphql_arg_types", None) or {},
+                )
+                request_kwargs["json"] = {"query": query_str}
+            else:
+                request_kwargs["json"] = req_params
+        elif surface.param_location == ParamLocation.BODY_FORM:
+            request_kwargs["data"] = req_params
+        else:
+            if req_params:
+                request_kwargs["params"] = req_params
+
         if headers:
             request_kwargs["headers"] = headers
         if cookies:
             request_kwargs["cookies"] = cookies
 
-        return await _send_prepared_request(
+        return await _send_with_auth_retry(
             session,
             method=method,
             url=url,

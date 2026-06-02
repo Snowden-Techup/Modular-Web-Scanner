@@ -766,6 +766,15 @@
                 <label class="form-label" for="submit_field">제출 필드명</label>
                 <input id="submit_field" type="text" class="form-control" value="Login">
               </div>
+              <div class="col-12">
+                <div class="form-check mt-1">
+                  <input id="login_json" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="login_json">
+                    JSON 로그인 API (<code>application/json</code>)
+                  </label>
+                </div>
+                <div class="form-text">로그인 URL에 username/password JSON 본문으로 POST합니다.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -792,6 +801,56 @@
               <div class="col-md-3">
                 <label class="form-label" for="surfaces_output">공격면 파일</label>
                 <input id="surfaces_output" type="text" class="form-control" value="attack_surfaces.json">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <span>4-2) 크롤러 / SPA</span>
+            <span class="hint">동적 크롤 · GraphQL</span>
+          </div>
+          <div class="section-body">
+            <div class="row g-2">
+              <div class="col-md-4">
+                <label class="form-label" for="crawl_mode">크롤 모드</label>
+                <select id="crawl_mode" class="form-select">
+                  <option value="hybrid" selected>hybrid (정적+SPA)</option>
+                  <option value="static">static</option>
+                  <option value="dynamic">dynamic (SPA)</option>
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="spa_max_routes">SPA 최대 라우트</label>
+                <input id="spa_max_routes" type="number" class="form-control" min="1" max="500" value="50">
+              </div>
+              <div class="col-md-4 d-flex align-items-end">
+                <div class="form-check mb-2">
+                  <input id="unsafe_click" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="unsafe_click">SPA 비안전 클릭 (submit 외 버튼)</label>
+                </div>
+              </div>
+              <div class="col-12">
+                <label class="form-label" for="local_storage">Local Storage (JSON)</label>
+                <input id="local_storage" type="text" class="form-control" placeholder='{"token":"eyJ..."}'>
+              </div>
+              <div class="col-12">
+                <label class="form-label" for="exclude_urls">제외 URL 패턴</label>
+                <input id="exclude_urls" type="text" class="form-control" placeholder="/admin/.*, /setup\.php">
+                <div class="form-text">쉼표로 구분한 정규식 패턴</div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-check">
+                  <input id="fuzz_csrf" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="fuzz_csrf">CSRF 보호 surface 퍼징</label>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-check">
+                  <input id="graphql_unsafe" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="graphql_unsafe">GraphQL Mutation 공격</label>
+                </div>
               </div>
             </div>
           </div>
@@ -1465,13 +1524,24 @@
           username_field: document.getElementById("username_field").value,
           password_field: document.getElementById("password_field").value,
           csrf_field: document.getElementById("csrf_field").value,
-          submit_field: document.getElementById("submit_field").value
+          submit_field: document.getElementById("submit_field").value,
+          login_json: document.getElementById("login_json").checked,
+          login_body_format: document.getElementById("login_json").checked ? "json" : "auto"
         },
         engine: {
           rps: toInt("rps", 50),
           session_pool_size: toInt("session_pool_size", 3),
           output: document.getElementById("output").value,
           surfaces_output: document.getElementById("surfaces_output").value
+        },
+        crawler: {
+          crawl_mode: document.getElementById("crawl_mode").value,
+          spa_max_routes: toInt("spa_max_routes", 50),
+          unsafe_click: document.getElementById("unsafe_click").checked,
+          local_storage: document.getElementById("local_storage").value.trim() || "{}",
+          exclude_urls: parseCommaList(document.getElementById("exclude_urls").value),
+          fuzz_csrf: document.getElementById("fuzz_csrf").checked,
+          graphql_unsafe: document.getElementById("graphql_unsafe").checked
         },
         sqli: {
           include_time_based: document.getElementById("include_time_based").checked,

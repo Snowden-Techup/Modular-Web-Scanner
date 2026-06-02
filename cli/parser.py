@@ -85,6 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON report output path",
     )
     parser.add_argument(
+        "--login-body-format",
+        type=str,
+        choices=["auto", "form", "json"],
+        default="auto",
+        help="Login POST body format: form (x-www-form-urlencoded), json, or auto-detect (default: auto)",
+    )
+    parser.add_argument(
+        "--login-json",
+        action="store_true",
+        help="Shorthand for --login-body-format json (JSON {\"username\":...} API login)",
+    )
+    parser.add_argument(
         "--surfaces-output",
         type=str,
         default="attack_surfaces.json",
@@ -354,8 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="reflected_XSS payload mutation level (0=off/raw, 1=basic WAF bypass, 2=advanced/encoding, 3=obfuscation)"
     )
-
-    # ── OOB / OAST 옵션 ──────────────────────────────────────────────────────
+     # ── OOB / OAST 옵션 ──────────────────────────────────────────────────────
     parser.add_argument(
         "--oob-server",
         type=str,
@@ -389,6 +400,68 @@ def build_parser() -> argparse.ArgumentParser:
         default=10.0,
         metavar="SEC",
         help="OAST API 단일 HTTP 요청 타임아웃(초) (기본: 10.0)",
+    )
+    
+    parser.add_argument(
+        "--local-storage",
+        type=str,
+        default="{}",
+        help="SPA 세션 유지를 위한 Local Storage JSON 데이터 (예: '{\"token\": \"eyJ...\"}')"
+    )
+    parser.add_argument(
+        "--crawl-mode",
+        type=str,
+        choices=["static", "dynamic", "hybrid"],
+        default="hybrid",
+        help=(
+            "크롤링 방식: static=HTTP 정적만, dynamic=Playwright SPA만, "
+            "hybrid=정적+동적 병렬 (기본)"
+        ),
+    )
+    parser.add_argument(
+        "--fuzz-csrf",
+        action="store_true",
+        help=(
+            "동적 토큰(CSRF 등)이 감지된 surface도 퍼징합니다. "
+            "기본은 CSRF 보호 폼을 제외하며, 활성화 시 매 요청마다 토큰을 갱신해 공격합니다 "
+            "(느리고 세션/상태에 영향을 줄 수 있음)."
+        ),
+    )
+    parser.add_argument(
+        "--fuzz-auth",
+        action="store_true",
+        help=(
+            "로그인·회원가입·토큰 발급 등 인증 엔드포인트도 퍼징 대상에 포함합니다. "
+            "기본은 /login, --login-url 등 인증 surface를 제외합니다 (bruteforce 모드는 예외)."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-auth-paths",
+        nargs="+",
+        default=[],
+        help=(
+            "추가로 퍼징에서 제외할 인증 URL 경로 조각 "
+            "(예: '/rest/user/login' '/api/auth')"
+        ),
+    )
+    parser.add_argument(
+        "--graphql-unsafe",
+        action="store_true",
+        help=(
+            "GraphQL Mutation에 대한 공격도 수행합니다. "
+            "기본은 안전 모드(Query만 공격)이며, 활성화 시 DB/상태가 변경될 수 있으니 주의."
+        ),
+    )
+    parser.add_argument(
+        "--spa-max-routes",
+        type=int,
+        default=50,
+        help="SPA BFS 라우트 탐색 최대 개수 (기본 50)",
+    )
+    parser.add_argument(
+        "--unsafe-click",
+        action="store_true",
+        help="SPA: submit 외 UI 버튼도 클릭 (커버리지↑, 로그아웃 등 위험↑)",
     )
     return parser
 
