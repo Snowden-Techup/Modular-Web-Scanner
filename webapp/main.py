@@ -64,6 +64,20 @@ class AuthSettings(BaseModel):
     password_field: str = "password"
     csrf_field: str = ""
     submit_field: str = ""
+    login_json: bool = False
+    login_body_format: Literal["auto", "form", "json"] = "auto"
+
+
+class CrawlerOptions(BaseModel):
+    crawl_mode: Literal["static", "dynamic", "hybrid"] = "hybrid"
+    spa_max_routes: int = Field(default=50, ge=1, le=500)
+    unsafe_click: bool = False
+    local_storage: str = "{}"
+    exclude_urls: list[str] = Field(default_factory=list)
+    fuzz_csrf: bool = False
+    fuzz_auth: bool = False
+    graphql_unsafe: bool = False
+    exclude_auth_paths: list[str] = Field(default_factory=list)
 
 
 class EngineOptions(BaseModel):
@@ -148,6 +162,7 @@ class ScanRequest(BaseModel):
     ] = "all"
     level: int = Field(default=1, ge=0, le=3)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    crawler: CrawlerOptions = Field(default_factory=CrawlerOptions)
     engine: EngineOptions = Field(default_factory=EngineOptions)
     sqli: SQLiOptions = Field(default_factory=SQLiOptions)
     osci: OSCiOptions = Field(default_factory=OSCiOptions)
@@ -348,6 +363,9 @@ async def get_schema() -> dict:
             "oob_retries": 3,
             "oob_poll_delay": 5.0,
             "oob_poll_timeout": 10.0,
+            "crawl_mode": "hybrid",
+            "spa_max_routes": 50,
+            "local_storage": "{}",
         },
     }
 

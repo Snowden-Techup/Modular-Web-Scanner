@@ -22,6 +22,7 @@ class SQLiInternalPayload(Payload):
 class SQLiModule(BaseModule):
     def __init__(self, **kwargs):
         super().__init__("SQL Injection")
+        self.allow_redirects = False
         self.exploit_signatures = self._load_json("exploit_errors.json")
         self.syntax_signatures = self._load_json("syntax_errors.json")
         self.mismatch_signatures = self._load_json("mismatch_errors.json")
@@ -42,11 +43,14 @@ class SQLiModule(BaseModule):
         self.random_seed = kwargs.get('random_seed', 37)
         
         self._global_time_lock = asyncio.Lock()
-        self._fast_per_param = 0
-        self._known_targets = set()
-        self._total_fast_expected = 0
-        self._global_fast_completed = 0
         self._counter_lock = asyncio.Lock()
+        
+        self._fast_per_param = 0
+        self._time_per_param = 0
+        
+        self._global_completed_payloads = 0  # 완료된 페이로드 카운트
+        self._current_param_index = 1        # 현재 진행 중인 파라미터 번호
+        self._known_targets = set()
         
         # 이벤트 기반 장벽을 통해 시간 페이로드 직렬 처리
         self._barrier_event = asyncio.Event()
@@ -68,17 +72,9 @@ class SQLiModule(BaseModule):
         return "time" in attack_type or "stacked" in attack_type
 
     def get_target_parameters(self, surface: Any, all_params: Iterable[str]) -> Iterable[str]:
-        if self._fast_per_param == 0:
+        if self._fast_per_param == 0 and self._time_per_param == 0:
             self.get_payload_count()
-        params = list(all_params)
-        url = getattr(surface, "url", "")
-        method = getattr(surface, "method", "GET")
-        for p in params:
-            tid = (method, url, p)
-            if tid not in self._known_targets:
-                self._known_targets.add(tid)
-                self._total_fast_expected += self._fast_per_param
-        return params
+        return list(all_params)
 
     def get_payload_count(self) -> int:
         filtered = get_sqli_payloads(self.target_dbms)
@@ -92,11 +88,15 @@ class SQLiModule(BaseModule):
             selected_time_count = min(limit, time_c)
         
         multiplier = self.evasion_level + 1
+        
+        # 각 파라미터당 할당될 일반/시간 페이로드 개수 저장
         self._fast_per_param = fast_c * multiplier
-        return self._fast_per_param + (selected_time_count * multiplier)
+        self._time_per_param = selected_time_count * multiplier
+        
+        return self._fast_per_param + self._time_per_param
 
     def get_payloads(self) -> Iterator[Payload]:
-        if self._fast_per_param == 0: 
+        if self._fast_per_param == 0 and self._time_per_param == 0: 
             self.get_payload_count()
 
         # payload.py 에서 필터링된 페이로드 리스트 로드
@@ -156,12 +156,13 @@ class SQLiModule(BaseModule):
                 await asyncio.sleep(2.0)
 
             try:
-                is_hit, evidences, has_syntax_error = detect_sqli(
+                is_hit, evidences, has_syntax_error = await detect_sqli(
                     response=response, payload=payload, elapsed_time=elapsed_time,
                     exploit_signatures=self.exploit_signatures,
                     syntax_signatures=self.syntax_signatures,
                     mismatch_signatures=self.mismatch_signatures,
-                    original_res=original_res
+                    original_res=original_res,
+                    requester=requester
                 )
                 final_hit, final_evidences = await verify_sqli_logic(
                     response, payload, original_res, requester, is_hit, evidences, has_syntax_error, self.syntax_signatures
@@ -169,8 +170,13 @@ class SQLiModule(BaseModule):
                 return final_hit, final_evidences, payload
             finally:
                 async with self._counter_lock:
-                    self._global_fast_completed += 1
-                    if self._global_fast_completed >= self._total_fast_expected and self._total_fast_expected > 0:
+                    self._global_completed_payloads += 1
+                    
+                    n = self._current_param_index
+                    # n * (일반 페이로드 개수) + (n-1) * (시간 페이로드 개수)
+                    target_count = (n * self._fast_per_param) + ((n - 1) * self._time_per_param)
+                    
+                    if self._global_completed_payloads >= target_count:
                         if not self._barrier_event.is_set():
                             self._barrier_event.set()
 
@@ -189,22 +195,21 @@ class SQLiModule(BaseModule):
                         try:
                             await asyncio.wait_for(self._barrier_event.wait(), timeout=10.0)
                         except asyncio.TimeoutError:
-                            current_completed = self._global_fast_completed
+                            current_completed = self._global_completed_payloads
                             
                             if current_completed == last_completed:
                                 stuck_count += 1
                             else:
                                 stuck_count = 0
                                 last_completed = current_completed
-                            
                             # 30초(10초 * 3) 동안 일반 페이로드 완료 없으면 강제 돌파
                             if stuck_count >= 3:
-                                if not self._time_phase_active:
-                                    self._barrier_event.set()
+                                self._barrier_event.set()
                                 break
                     
                 if not self._time_phase_active:
                     self._time_phase_active = True
+                    await asyncio.sleep(4.5)
 
                 # 2. 전역 직렬 실행 락
                 async with self._global_time_lock:
@@ -216,15 +221,15 @@ class SQLiModule(BaseModule):
                         real_res = await requester(real_val)
                         real_elapsed = asyncio.get_event_loop().time() - start_ts
                         
-                        # 서버 회복 대기
                         await asyncio.sleep(4.5)
 
-                        is_hit, evidences, has_syntax_error = detect_sqli(
+                        is_hit, evidences, has_syntax_error = await detect_sqli(
                             response=real_res, payload=actual_payload, elapsed_time=real_elapsed,
                             exploit_signatures=self.exploit_signatures,
                             syntax_signatures=self.syntax_signatures,
                             mismatch_signatures=self.mismatch_signatures,
-                            original_res=original_res
+                            original_res=original_res,
+                            requester=requester
                         )
 
                         if is_hit and not any(tag in str(evidences) for tag in ["[Time]", "[Error]", "[Reflection]"]):
@@ -234,20 +239,24 @@ class SQLiModule(BaseModule):
                         return is_hit, evidences, actual_payload
 
                     except asyncio.TimeoutError:
-                        is_hit, evidences, _ = detect_sqli(
+                        is_hit, evidences, has_syntax_error = await detect_sqli(
                             response=None, payload=actual_payload, elapsed_time=15.0,
                             exploit_signatures=self.exploit_signatures,
                             syntax_signatures=self.syntax_signatures,
                             mismatch_signatures=self.mismatch_signatures,
-                            original_res=original_res
+                            original_res=original_res,
+                            requester=requester
                         )
                         return True, evidences, actual_payload
             finally:
                 async with self._counter_lock:
+                    self._global_completed_payloads += 1
                     self._time_attack_in_flight -= 1
                     if self._time_attack_in_flight == 0:
                         if self._time_phase_active:
                             self._barrier_event.clear()
                             self._time_phase_active = False
+                            self._current_param_index += 1
+                            await asyncio.sleep(30.0)
 
         return False, [], payload

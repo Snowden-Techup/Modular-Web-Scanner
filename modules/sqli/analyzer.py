@@ -40,14 +40,36 @@ def _remove_direct_reflection(text: str, payload_value: str) -> str:
         scrubbed = scrubbed.replace(variant, "[DIRECT_REFLECTION_REMOVED]")
     return scrubbed
 
-def detect_sqli(response, payload, elapsed_time, exploit_signatures, syntax_signatures, mismatch_signatures, original_res=None):
+async def detect_sqli(response, payload, elapsed_time, exploit_signatures, syntax_signatures, mismatch_signatures, original_res=None, requester=None):
     evidences = []
-    res_text = response.text
+    attack_type = payload.attack_type.lower()
+    payload_value = payload.value
+    
+    is_time_related = "time" in attack_type or "stacked" in attack_type
+
+    # Status 0면 최대 2회 재요청
+    if not is_time_related and requester:
+        current_status = 0
+        if response is not None:
+            current_status = getattr(response, "status", getattr(response, "status_code", 0)) or 0
+            
+        retry_count = 0
+        while current_status == 0 and retry_count < 2:
+            await asyncio.sleep(1.5)
+            try:
+                response = await requester(payload_value)
+                if response is not None:
+                    current_status = getattr(response, "status", getattr(response, "status_code", 0)) or 0
+                    elapsed_time = getattr(response, "elapsed_time", getattr(response, "elapsed", elapsed_time))
+            except Exception:
+                pass
+            retry_count += 1
+            
+    res_text = response.text if response else ""
+    current_status = getattr(response, "status", getattr(response, "status_code", 0)) or 0 if response else 0
     
     orig_elapsed = getattr(original_res, "elapsed_time", getattr(getattr(original_res, "elapsed", object()), "total_seconds", lambda: 0.0)()) if original_res else 0.0
 
-    attack_type = payload.attack_type.lower()
-    payload_value = payload.value
     marker_start = "SVSDAAAA"
     marker_stop = "VASDAAAA"
     dynamic_marker_pattern = re.compile(f"{marker_start}(.*?){marker_stop}", re.I | re.DOTALL)
@@ -55,8 +77,6 @@ def detect_sqli(response, payload, elapsed_time, exploit_signatures, syntax_sign
     has_syntax_error = False
     has_execution_error = False
 
-    is_time_related = "time" in attack_type or "stacked" in attack_type
-    
     # [1] 시간 페이로드 타임아웃 탐지
     if is_time_related:
         if response is None and elapsed_time >= 4.5:
@@ -128,7 +148,6 @@ async def verify_sqli_logic(response, payload, original_res, requester, is_vuln_
     
     # 3. 논리 구조가 있으면 T!=F 대조 시도
     if has_logic or is_vuln_1st:
-        
         true_logic = ""
         false_logic = ""
         
@@ -177,7 +196,7 @@ async def verify_sqli_logic(response, payload, original_res, requester, is_vuln_
                         
                         r_t_status = getattr(retry_t_res, "status", getattr(retry_t_res, "status_code", 0)) or 0
                         r_f_status = getattr(retry_f_res, "status", getattr(retry_f_res, "status_code", 0)) or 0
-                        
+
                         if r_t_status == 0 or r_f_status == 0:
                             continue
                         

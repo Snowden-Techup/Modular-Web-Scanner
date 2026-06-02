@@ -665,24 +665,11 @@
       word-break: break-all;
       line-height: 1.45;
     }
-    .report-findings-title {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .finding-count-badge {
-      font-size: 0.78rem;
-      font-weight: 600;
-      color: #93c5fd;
-      background: rgba(59, 130, 246, 0.14);
-      border: 1px solid rgba(59, 130, 246, 0.35);
-      border-radius: 999px;
-      padding: 2px 10px;
-      line-height: 1.35;
+    .report-summary-row {
+      font-size: 0.74rem;
+      color: #64748b;
+      margin-bottom: 10px;
       font-family: "JetBrains Mono", monospace;
-    }
-    .finding-count-badge[hidden] {
-      display: none;
     }
 
     .scan-history-box {
@@ -944,11 +931,20 @@
               </div>
               <div class="col-md-3">
                 <label class="form-label" for="csrf_field">CSRF 필드명</label>
-                <input id="csrf_field" type="text" class="form-control" value="" placeholder="없으면 비움 (DVWA: user_token)">
+                <input id="csrf_field" type="text" class="form-control" value="user_token">
               </div>
               <div class="col-md-3">
                 <label class="form-label" for="submit_field">제출 필드명</label>
-                <input id="submit_field" type="text" class="form-control" value="" placeholder="없으면 비움 (DVWA: Login)">
+                <input id="submit_field" type="text" class="form-control" value="Login">
+              </div>
+              <div class="col-12">
+                <div class="form-check mt-1">
+                  <input id="login_json" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="login_json">
+                    JSON 로그인 API (<code>application/json</code>)
+                  </label>
+                </div>
+                <div class="form-text">로그인 URL에 username/password JSON 본문으로 POST합니다.</div>
               </div>
             </div>
           </div>
@@ -976,6 +972,56 @@
               <div class="col-md-3">
                 <label class="form-label" for="surfaces_output">공격면 파일</label>
                 <input id="surfaces_output" type="text" class="form-control" value="attack_surfaces.json">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <span>4-2) 크롤러 / SPA</span>
+            <span class="hint">동적 크롤 · GraphQL</span>
+          </div>
+          <div class="section-body">
+            <div class="row g-2">
+              <div class="col-md-4">
+                <label class="form-label" for="crawl_mode">크롤 모드</label>
+                <select id="crawl_mode" class="form-select">
+                  <option value="hybrid" selected>hybrid (정적+SPA)</option>
+                  <option value="static">static</option>
+                  <option value="dynamic">dynamic (SPA)</option>
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="spa_max_routes">SPA 최대 라우트</label>
+                <input id="spa_max_routes" type="number" class="form-control" min="1" max="500" value="50">
+              </div>
+              <div class="col-md-4 d-flex align-items-end">
+                <div class="form-check mb-2">
+                  <input id="unsafe_click" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="unsafe_click">SPA 비안전 클릭 (submit 외 버튼)</label>
+                </div>
+              </div>
+              <div class="col-12">
+                <label class="form-label" for="local_storage">Local Storage (JSON)</label>
+                <input id="local_storage" type="text" class="form-control" placeholder='{"token":"eyJ..."}'>
+              </div>
+              <div class="col-12">
+                <label class="form-label" for="exclude_urls">제외 URL 패턴</label>
+                <input id="exclude_urls" type="text" class="form-control" placeholder="/admin/.*, /setup\.php">
+                <div class="form-text">쉼표로 구분한 정규식 패턴</div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-check">
+                  <input id="fuzz_csrf" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="fuzz_csrf">CSRF 보호 surface 퍼징</label>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-check">
+                  <input id="graphql_unsafe" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="graphql_unsafe">GraphQL Mutation 공격</label>
+                </div>
               </div>
             </div>
           </div>
@@ -1266,17 +1312,14 @@
           <div class="stat-value" id="reportTarget" style="font-size: 0.95rem;">-</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label" id="reportFindingsLabel">공격 유형</div>
-          <div class="stat-value" id="reportFindings">-</div>
+          <div class="stat-label" id="reportFindingsLabel">공격 유형 수</div>
+          <div class="stat-value" id="reportFindings">0</div>
         </div>
       </div>
 
       <div class="report-box">
         <div class="section-header" style="padding:0 0 8px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">
-          <span class="report-findings-title">
-            발견 내역
-            <span id="findingCountBadge" class="finding-count-badge" hidden></span>
-          </span>
+          <span>발견 내역</span>
           <span class="hint" id="reportScanId">scan_id: (없음)</span>
         </div>
         <div id="findingList" class="report-list">
@@ -1309,13 +1352,11 @@
     const reportTarget = document.getElementById("reportTarget");
     const reportFindings = document.getElementById("reportFindings");
     const reportScanId = document.getElementById("reportScanId");
-    const findingCountBadge = document.getElementById("findingCountBadge");
     const findingList = document.getElementById("findingList");
     const scanHistoryList = document.getElementById("scanHistoryList");
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
     let scanHistoryItems = [];
     const loginScreen = document.getElementById("loginScreen");
-    const appShell = document.getElementById("appShell");
     const loginUsername = document.getElementById("loginUsername");
     const loginPassword = document.getElementById("loginPassword");
     const loginError = document.getElementById("loginError");
@@ -1665,58 +1706,44 @@
         </div>`;
     }
 
-    function resolveScanType(scan) {
-      const req = scan.request || {};
-      return req.scan_type || req.type || "-";
-    }
-
-    function setFindingCount(count) {
-      if (!findingCountBadge) return;
-      if (count == null || Number.isNaN(Number(count)) || Number(count) < 0) {
-        findingCountBadge.hidden = true;
-        findingCountBadge.textContent = "";
-        return;
-      }
-      findingCountBadge.hidden = false;
-      findingCountBadge.textContent = `${Number(count)}건`;
-    }
-
     function renderReport(scan) {
       reportScanId.textContent  = `scan_id: ${scan.scan_id || "(없음)"}`;
       reportStatus.textContent  = scan.status || "-";
       reportProgress.textContent = formatProgressPercent(scan);
       reportTarget.textContent  = scan.target || scan.request?.url || "-";
-      reportFindings.textContent = resolveScanType(scan);
 
       const reportVulns  = scan.report_json?.vulnerabilities || [];
       const rawFindings  = scan.findings || [];
       const useGrouped   = reportVulns.length > 0 && isGroupedFormat(reportVulns);
-      const scanDone = scan.status === "completed" || scan.status === "failed";
+      const flatFallback = !useGrouped && (rawFindings.length > 0 || reportVulns.length > 0);
 
-      if (!scanDone) {
-        setFindingCount(null);
+      /* ── 요약 카운트 ── */
+      const findingsLabel = document.getElementById("reportFindingsLabel");
+      if (useGrouped) {
+        const sum = scan.report_json?.metadata?.summary || {};
+        reportFindings.textContent = String(sum.vulnerability_types ?? reportVulns.length);
+        if (findingsLabel) findingsLabel.textContent = "공격 유형 수";
+      } else {
+        const n = rawFindings.length || reportVulns.length;
+        reportFindings.textContent = String(n);
+        if (findingsLabel) findingsLabel.textContent = "취약점 수";
       }
 
       if (useGrouped) {
         const sum = scan.report_json?.metadata?.summary || {};
-        const dedupedCount = sum.findings_deduped ?? reportVulns.length;
-        if (scanDone) {
-          setFindingCount(dedupedCount);
-        }
-        findingList.innerHTML = reportVulns.map(renderGroupCard).join("");
+        const deduped = sum.findings_deduped != null ? `중복제거 ${sum.findings_deduped}건` : "";
+        const raw     = sum.findings_raw     != null ? `원본 ${sum.findings_raw}건` : "";
+        const summaryLine = [deduped, raw].filter(Boolean).join(" · ");
+        findingList.innerHTML =
+          (summaryLine ? `<div class="report-summary-row">${escapeHtml(summaryLine)}</div>` : "") +
+          reportVulns.map(renderGroupCard).join("");
         return;
       }
 
       const items = rawFindings.length > 0 ? rawFindings : reportVulns;
       if (!items.length) {
-        if (scanDone) {
-          setFindingCount(0);
-        }
         findingList.innerHTML = '<div class="muted">발견된 취약점이 없습니다.</div>';
         return;
-      }
-      if (scanDone) {
-        setFindingCount(items.length);
       }
       const sorted = [...items].sort((a, b) => {
         const ra = SEVERITY_SORT_ORDER[severityTier(a.attack_info?.severity ?? a.severity)] ?? 4;
@@ -1789,7 +1816,6 @@
         const data = await requestJson(`/api/scan/${scanId}`);
         renderReport(data);
       } catch (err) {
-        setFindingCount(null);
         findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;
       }
     }
@@ -1824,14 +1850,25 @@
           password: document.getElementById("password").value,
           username_field: document.getElementById("username_field").value,
           password_field: document.getElementById("password_field").value,
-          csrf_field: document.getElementById("csrf_field").value.trim(),
-          submit_field: document.getElementById("submit_field").value.trim()
+          csrf_field: document.getElementById("csrf_field").value,
+          submit_field: document.getElementById("submit_field").value,
+          login_json: document.getElementById("login_json").checked,
+          login_body_format: document.getElementById("login_json").checked ? "json" : "auto"
         },
         engine: {
           rps: toInt("rps", 50),
           session_pool_size: toInt("session_pool_size", 3),
           output: document.getElementById("output").value,
           surfaces_output: document.getElementById("surfaces_output").value
+        },
+        crawler: {
+          crawl_mode: document.getElementById("crawl_mode").value,
+          spa_max_routes: toInt("spa_max_routes", 50),
+          unsafe_click: document.getElementById("unsafe_click").checked,
+          local_storage: document.getElementById("local_storage").value.trim() || "{}",
+          exclude_urls: parseCommaList(document.getElementById("exclude_urls").value),
+          fuzz_csrf: document.getElementById("fuzz_csrf").checked,
+          graphql_unsafe: document.getElementById("graphql_unsafe").checked
         },
         sqli: {
           include_time_based: document.getElementById("include_time_based").checked,
@@ -1943,7 +1980,7 @@
       const username = loginUsername.value.trim();
       const password = loginPassword.value;
       if (!username || !password) {
-        showLoginError("회원가입용 아이디/비밀번호를 입력하세요.");
+        showLoginError("회원가입용 아이디·비밀번호를 입력하세요.");
         return;
       }
       showLoginError("");
@@ -1963,7 +2000,7 @@
       const username = loginUsername.value.trim();
       const password = loginPassword.value;
       if (!username || !password) {
-        showLoginError("로그인용 아이디/비밀번호를 입력하세요.");
+        showLoginError("아이디와 비밀번호를 입력하세요.");
         return;
       }
       showLoginError("");
@@ -1974,25 +2011,23 @@
           body: JSON.stringify({ username, password })
         });
         setAuth(data.access_token, data.user?.username || username);
-        loginPassword.value = "";
         await loadScanHistory();
       } catch (err) {
-        setAuth("", "");
         showLoginError(`로그인 실패: ${err}`);
       }
     });
 
     logoutBtn.addEventListener("click", () => {
       setAuth("", "");
-      loginPassword.value = "";
-      clearScanError();
+      lastScanId = "";
+      scanMeta.textContent = "scan_id: (없음)";
     });
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       if (!accessToken) {
+        showScanError("스캔을 시작하려면 먼저 로그인하세요.");
         openLoginModal();
-        showScanError("스캔 실행 전 로그인이 필요합니다. 상단 로그인 버튼을 이용하세요.");
         return;
       }
       const payload = buildPayload();
@@ -2009,8 +2044,7 @@
         reportTarget.textContent = data.request?.url || "-";
         reportStatus.textContent = "queued";
         reportProgress.textContent = "0.0%";
-        reportFindings.textContent = payload.scan_type || "all";
-        setFindingCount(null);
+        reportFindings.textContent = "0";
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
         updateScanProgressUI({
           status: "queued",

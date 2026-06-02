@@ -89,7 +89,6 @@ class FuzzerEngine:
         delay: float = 0.0,
         request_timeout: float = 15.0,
         queue_maxsize: int = 0,
-        dynamic_lock_namespace: str | None = None,
     ) -> None:
         if max_concurrent_requests < 1:
             raise ValueError("max_concurrent_requests must be >= 1")
@@ -109,7 +108,6 @@ class FuzzerEngine:
         self.session_pool_size = session_pool_size
         self.delay = delay
         self.request_timeout = request_timeout
-        self.dynamic_lock_namespace = dynamic_lock_namespace
 
         self._semaphore = asyncio.Semaphore(max_concurrent_requests)
         self._queue: asyncio.Queue[AttackJob | None] = asyncio.Queue(maxsize=queue_maxsize)
@@ -446,11 +444,7 @@ class FuzzerEngine:
                     for payload in payloads
                 ]
 
-                baseline_response = await send_baseline_request(
-                    session,
-                    surface,
-                    lock_namespace=self.dynamic_lock_namespace,
-                )
+                baseline_response = await send_baseline_request(session, surface)
                 batch_size = max(1, self.max_concurrent_requests)
                 for batch in self._chunked(attack_units, batch_size):
                     if stop_event is not None and stop_event.is_set():

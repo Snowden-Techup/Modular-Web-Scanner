@@ -31,12 +31,48 @@ def _blankable_auth_field(auth: dict, key: str) -> str:
     return str(raw).strip()
 
 
+def _resolve_login_body_format(auth: dict) -> str:
+    if auth.get("login_json"):
+        return "json"
+    return auth.get("login_body_format") or "auto"
+
+
+def _apply_spa_runtime_options(args: Namespace, *, on_warning) -> None:
+    from fuzzer.request_builder import set_graphql_safe_mode
+
+    if getattr(args, "graphql_unsafe", False):
+        if on_warning:
+            on_warning(
+                "GraphQL unsafe mode: mutations will be attacked; "
+                "server/database state may change."
+            )
+        set_graphql_safe_mode(False)
+    else:
+        set_graphql_safe_mode(True)
+    if getattr(args, "unsafe_click", False) and on_warning:
+        on_warning(
+            "SPA unsafe click: non-submit UI buttons may be clicked "
+            "(higher coverage; logout/session loss risk)."
+        )
+    if getattr(args, "fuzz_csrf", False) and on_warning:
+        on_warning(
+            "CSRF fuzzing: dynamic-token surfaces will be attacked "
+            "(slower; may invalidate sessions)."
+        )
+    if getattr(args, "fuzz_auth", False) and on_warning:
+        on_warning(
+            "Auth endpoint fuzzing: login/token surfaces will be attacked "
+            "(may invalidate sessions or lock accounts)."
+        )
+
+
 def _build_args_from_payload(payload: dict) -> Namespace:
     from cli.options import parse_bf_length
 
     bf = payload.get("bruteforce", {})
     engine = payload.get("engine", {})
     auth = payload.get("auth", {})
+    crawler = payload.get("crawler", {})
     sqli = payload.get("sqli", {})
     osci = payload.get("osci", {})
     ssrf = payload.get("ssrf", {})
@@ -59,6 +95,8 @@ def _build_args_from_payload(payload: dict) -> Namespace:
 
     raw_url = (payload.get("url") or payload.get("target_url") or "").strip()
     scan_url = raw_url.rstrip("/") if raw_url else ""
+    login_body_format = _resolve_login_body_format(auth)
+    exclude_urls = list(crawler.get("exclude_urls") or payload.get("exclude_urls") or [])
 
     return Namespace(
         url=scan_url,
@@ -72,12 +110,22 @@ def _build_args_from_payload(payload: dict) -> Namespace:
         password_field=auth.get("password_field") or "password",
         csrf_field=_blankable_auth_field(auth, "csrf_field"),
         submit_field=_blankable_auth_field(auth, "submit_field"),
+        login_json=bool(auth.get("login_json", False)),
+        login_body_format=login_body_format,
         output=engine.get("output", "scan_report.json"),
         surfaces_output=engine.get("surfaces_output", "attack_surfaces.json"),
         type=payload.get("scan_type") or payload.get("type") or "all",
         session_pool_size=int(engine.get("session_pool_size", 3)),
-        exclude_urls=list(payload.get("exclude_urls") or []),
         level=level,
+        crawl_mode=crawler.get("crawl_mode", "hybrid"),
+        spa_max_routes=int(crawler.get("spa_max_routes", 50)),
+        local_storage=crawler.get("local_storage", "{}"),
+        unsafe_click=bool(crawler.get("unsafe_click", False)),
+        exclude_urls=exclude_urls,
+        fuzz_csrf=bool(crawler.get("fuzz_csrf", False)),
+        fuzz_auth=bool(crawler.get("fuzz_auth", False)),
+        graphql_unsafe=bool(crawler.get("graphql_unsafe", False)),
+        exclude_auth_paths=list(crawler.get("exclude_auth_paths") or []),
         bf_wordlist=bf.get("bf_wordlist", "config/payloads/bruteforce/common_passwords.txt"),
         bf_disable_mutation=bool(bf.get("bf_disable_mutation", False)),
         bf_mutation_level=int(bf.get("bf_mutation_level", 1)),
@@ -185,6 +233,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     from cli.runner import prepare_scan_context
     from cli.surfaces import resolve_surfaces
     from fuzzer import FuzzerEngine
+    from fuzzer.auth_provider import scan_auth_lifecycle
     from fuzzer.request_builder import build_and_send_request
     from reporter import ReportGenerator
 
@@ -199,6 +248,14 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     scan_type = args.type
 
     await _scan_log(scan_id, f"[Celery] 스캔 시작: target={target_url}, type={scan_type}")
+    _apply_spa_runtime_options(
+        args,
+        on_warning=lambda msg: append_scan_log(scan_id, f"[WARNING] {msg}"),
+    )
+    await _scan_log(
+        scan_id,
+        f"CLI 인자 구성 완료 (crawl_mode={args.crawl_mode}, spa_max_routes={args.spa_max_routes})",
+    )
     if args.login_url:
         await _scan_log(
             scan_id,
@@ -232,7 +289,6 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         concurrency_per_module=context["queue_workers"],
         session_pool_size=max(1, args.session_pool_size),
         delay=context["delay"],
-        dynamic_lock_namespace=scan_id,
     )
 
     async def _request_sender(session, surface, parameter, payload, allow_redirects=True):
@@ -242,7 +298,6 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             parameter,
             payload,
             allow_redirects=allow_redirects,
-            lock_namespace=scan_id,
         )
 
     total_requests = max(1, context["total_requests"])
@@ -253,59 +308,60 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     bf_true_random_milestone_logs = args.type == "bruteforce" and bool(getattr(args, "bf_true_random", False))
     next_milestone = SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
 
-    scan_task = asyncio.create_task(
-        engine.run_with_attack_modules(surfaces=surfaces, request_sender=_request_sender)
-    )
+    async with scan_auth_lifecycle(args, base_cookies=cookies):
+        scan_task = asyncio.create_task(
+            engine.run_with_attack_modules(surfaces=surfaces, request_sender=_request_sender)
+        )
 
-    while not scan_task.done():
-        queued_total = engine.stats.queued
-        effective_total = max(total_requests, queued_total, 1)
-        completed = engine.stats.completed
-        progress_pct = min(100.0, round(completed / effective_total * 100, 1))
-        if not scan_task.done() and progress_pct >= 99.9:
-            progress_pct = 99.9
+        while not scan_task.done():
+            queued_total = engine.stats.queued
+            effective_total = max(total_requests, queued_total, 1)
+            completed = engine.stats.completed
+            progress_pct = min(100.0, round(completed / effective_total * 100, 1))
+            if not scan_task.done() and progress_pct >= 99.9:
+                progress_pct = 99.9
 
-        summary = {
-            "queued": queued_total,
-            "completed": completed,
-            "failures": engine.stats.failures,
-            "findings": engine.stats.findings,
-            "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": effective_total,
-            "planned_requests": total_requests,
-        }
+            summary = {
+                "queued": queued_total,
+                "completed": completed,
+                "failures": engine.stats.failures,
+                "findings": engine.stats.findings,
+                "elapsed_time": round(time.monotonic() - started_at, 2),
+                "total_requests": effective_total,
+                "planned_requests": total_requests,
+            }
 
-        now = time.monotonic()
-        progress_changed = progress_pct != last_logged_progress
-        if progress_changed or (now - last_db_sync_at) >= PROGRESS_DB_SYNC_INTERVAL:
-            await _scan_update(
-                scan_id,
-                progress_percent=progress_pct,
-                progress=int(progress_pct),
-                summary=summary,
-            )
-            last_db_sync_at = now
+            now = time.monotonic()
+            progress_changed = progress_pct != last_logged_progress
+            if progress_changed or (now - last_db_sync_at) >= PROGRESS_DB_SYNC_INTERVAL:
+                await _scan_update(
+                    scan_id,
+                    progress_percent=progress_pct,
+                    progress=int(progress_pct),
+                    summary=summary,
+                )
+                last_db_sync_at = now
 
-        if progress_changed:
-            await _scan_log(
-                scan_id,
-                f"진행률 {progress_pct}% (completed={engine.stats.completed}, "
-                f"findings={engine.stats.findings}, failures={engine.stats.failures})",
-            )
-            last_logged_progress = progress_pct
-
-        if bf_true_random_milestone_logs:
-            while engine.stats.completed >= next_milestone:
+            if progress_changed:
                 await _scan_log(
                     scan_id,
-                    f"[true-random BF] 누적 완료 {next_milestone}건 "
-                    f"(queued={engine.stats.queued}, findings={engine.stats.findings})",
+                    f"진행률 {progress_pct}% (completed={engine.stats.completed}, "
+                    f"findings={engine.stats.findings}, failures={engine.stats.failures})",
                 )
-                next_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
+                last_logged_progress = progress_pct
 
-        await asyncio.sleep(0.3)
+            if bf_true_random_milestone_logs:
+                while engine.stats.completed >= next_milestone:
+                    await _scan_log(
+                        scan_id,
+                        f"[true-random BF] 누적 완료 {next_milestone}건 "
+                        f"(queued={engine.stats.queued}, findings={engine.stats.findings})",
+                    )
+                    next_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
 
-    stats = await scan_task
+            await asyncio.sleep(0.3)
+
+        stats = await scan_task
     reporter = ReportGenerator(stats=stats, findings=engine.findings)
     await asyncio.to_thread(reporter.export_to_json, args.output)
     await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")

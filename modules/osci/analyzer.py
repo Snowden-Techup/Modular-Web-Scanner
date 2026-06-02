@@ -46,11 +46,28 @@ def _analyze_marker_context(text: str, marker: str) -> str:
             return "reflection_error"
     return "execution_output"
 
-def detect_osci(response, payload, elapsed_time, original_res=None):
+async def detect_osci(response, payload, elapsed_time, original_res=None, requester=None):
     evidences = []
     attack_type = getattr(payload, "attack_type", "").lower()
     payload_value = getattr(payload, "value", "")
     is_time_based = "time-based" in attack_type or "time" in attack_type
+    
+    # Status 0면 최대 2회 재요청
+    if not is_time_based and requester:
+        current_status = getattr(response, "status", getattr(response, "status_code", 0)) or 0 if response else 0
+        
+        retry_count = 0
+        while current_status == 0 and retry_count < 2:
+            await asyncio.sleep(1.5)
+            try:
+                retry_res = await requester(payload_value)
+                if retry_res is not None:
+                    current_status = getattr(retry_res, "status", getattr(retry_res, "status_code", 0)) or 0
+                    elapsed_time = getattr(retry_res, "elapsed_time", getattr(retry_res, "elapsed", elapsed_time))
+                    response = retry_res
+            except Exception:
+                pass
+            retry_count += 1
 
     marker = "SVSDAAAA"
     arithmetic_sum = 100
@@ -162,10 +179,24 @@ async def verify_osci_logic(response, payload, original_res, requester, is_hit, 
     if "requires verification" in str(evidences):
         try:
             retry_res = await requester(payload_value)
+            r_status = getattr(retry_res, "status", getattr(retry_res, "status_code", 0)) or 0 if retry_res else 0
+            # Status 0면 최대 2회 재요청
+            retry_count = 0
+            while r_status == 0 and retry_count < 2:
+                await asyncio.sleep(1.5)
+                try:
+                    retry_res = await requester(payload_value)
+                    r_status = getattr(retry_res, "status", getattr(retry_res, "status_code", 0)) or 0 if retry_res else 0
+                except Exception:
+                    pass
+                retry_count += 1
+
+            if r_status == 0 or retry_res is None:
+                return False, evidences + ["[False Positive] Network dropped during re-verification"]
+
             retry_text = retry_res.text
             has_marker_in_raw = marker in retry_text
             scrubbed_retry = _remove_direct_reflection(retry_text, payload_value)
-            
 
             arith_pattern = re.compile(rf"{marker}\D*(\d+)\D*{marker}", re.I | re.DOTALL)
             arith_matches = arith_pattern.findall(scrubbed_retry)
@@ -173,14 +204,14 @@ async def verify_osci_logic(response, payload, original_res, requester, is_hit, 
                 for val in arith_matches:
                     if int(val) == arithmetic_sum:
                         return True, evidences + [f"[Verified] Arithmetic result ({val}) confirmed on retry"]
-                        
+
             clip_pattern = re.compile(rf"{marker}\D*({arithmetic_sum})", re.I | re.DOTALL)
             clip_match = clip_pattern.search(scrubbed_retry)
             if clip_match:
                 val = clip_match.group(1)
                 return True, evidences + [f"[Verified] Clipped output result ({val}) confirmed on retry"]
 
-        except Exception as e:
+        except Exception:
             return False, []
-
+            
     return False, []

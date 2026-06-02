@@ -132,7 +132,11 @@ class CrawlerEngine:
         url = self.url_filter.normalize_url(url)
         if url in self._visited:
             return
-        if not self.url_filter.should_crawl(url):
+
+        # 공유 visited(다른 크롤러도 방문 기록) 확인하여 하이브리드 중복 방문 차단
+        if not self.url_filter.mark_visited(url):
+            self._visited.add(url)
+            logger.debug("[Engine] 공유 visited 히트, 스킵: %s", url)
             return
 
         self._visited.add(url)
@@ -318,10 +322,10 @@ class CrawlerEngine:
                 await self._queue.put((n_url, child_depth))
 
     def _log_summary(self):
-        logger.info("========== 크롤링 종료 ==========")
+        logger.info("========== 정적 크롤링 종료 ==========")
         stats_dict = self._stats.to_dict()
         logger.info(
-            "요청 성공: %s, 폼 발견: %s, 링크 발견: %s, 소요 시간: %s",
+            "[Static] 요청 성공: %s, 폼 발견: %s, 링크 발견: %s, 소요 시간: %s",
             stats_dict['successful_requests'],
             stats_dict['forms_found'],
             stats_dict['links_found'],

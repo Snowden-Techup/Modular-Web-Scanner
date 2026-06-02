@@ -28,7 +28,8 @@ class AuthConfig:
             success_indicator: Optional[str] = None,
             failure_indicator: Optional[str] = None,
             csrf_token_name: Optional[str] = "user_token",
-            submit_field: Optional[str] = "Login"
+            submit_field: Optional[str] = "Login",
+            login_body_format: str = "auto",
     ):
         self.login_url = login_url
         self.username = username
@@ -40,6 +41,7 @@ class AuthConfig:
         self.failure_indicator = failure_indicator
         self.csrf_token_name = csrf_token_name
         self.submit_field = submit_field
+        self.login_body_format = (login_body_format or "auto").strip().lower()
 
 
 class SessionManager:
@@ -149,23 +151,147 @@ class SessionManager:
             logger.debug("메타 리다이렉트 추출 실패: %s", e)
         return None
 
+    @staticmethod
+    def _detect_json_login(html: str) -> bool:
+        """로그인 페이지가 fetch/XHR 로 JSON 본문을 보내는지 휴리스틱 판별."""
+        if not html:
+            return False
+        lower = html.lower()
+        json_hints = (
+            "application/json",
+            "json.stringify",
+            '"content-type": "application/json"',
+            "'content-type': 'application/json'",
+            "content-type: application/json",
+        )
+        if not any(hint in lower for hint in json_hints):
+            return False
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            forms = soup.find_all("form")
+            if not forms:
+                return True
+            password_inputs = soup.find_all("input", {"type": "password"})
+            if password_inputs and any(hint in lower for hint in json_hints):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _resolve_login_body_format(auth_config: AuthConfig, login_page_html: str) -> str:
+        fmt = auth_config.login_body_format
+        if fmt in ("json", "form"):
+            return fmt
+        if SessionManager._detect_json_login(login_page_html):
+            return "json"
+        return "form"
+
+    @staticmethod
+    def _json_login_failed(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("success") is False or payload.get("ok") is False:
+            return True
+        error = payload.get("error") or payload.get("message") or payload.get("detail")
+        if isinstance(error, str) and error.strip():
+            lowered = error.lower()
+            failure_words = ("invalid", "fail", "wrong", "incorrect", "denied", "unauthorized")
+            return any(word in lowered for word in failure_words)
+        return False
+
+    @staticmethod
+    def _json_login_succeeded(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("success") is True or payload.get("ok") is True:
+            return True
+        if SessionManager.extract_token_from_json(payload):
+            return True
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            return SessionManager._json_login_succeeded(nested)
+        return False
+
+    @staticmethod
+    def build_login_payload(auth_config: AuthConfig, *, csrf_token: Optional[str] = None) -> dict:
+        login_data = {
+            auth_config.username_field: auth_config.username,
+            auth_config.password_field: auth_config.password,
+        }
+        if csrf_token and auth_config.csrf_token_name:
+            login_data[auth_config.csrf_token_name] = csrf_token
+        login_data.update(auth_config.extra_fields)
+        return login_data
+
+    @staticmethod
+    def extract_token_from_json(payload: Any) -> Optional[tuple[str, str]]:
+        """JSON 로그인 응답에서 (storage_key, token) 추출."""
+        token_keys = ("token", "access_token", "accessToken", "jwt", "id_token", "session", "sessionId")
+        if isinstance(payload, dict):
+            for key in token_keys:
+                raw = payload.get(key)
+                if isinstance(raw, str) and len(raw.strip()) >= 8:
+                    return key, raw.strip()
+            for key, value in payload.items():
+                extracted = SessionManager.extract_token_from_json(value)
+                if extracted:
+                    nested_key, token = extracted
+                    return f"{key}.{nested_key}", token
+        elif isinstance(payload, list):
+            for idx, item in enumerate(payload):
+                extracted = SessionManager.extract_token_from_json(item)
+                if extracted:
+                    nested_key, token = extracted
+                    return f"[{idx}].{nested_key}", token
+        return None
+
+    def apply_json_auth_token(self, json_body: Any) -> None:
+        """JSON 응답 토큰을 Authorization 헤더에 반영."""
+        extracted = self.extract_token_from_json(json_body)
+        if not extracted:
+            return
+        _, token = extracted
+        if token.lower().startswith("bearer "):
+            self._headers["Authorization"] = token
+        else:
+            self._headers["Authorization"] = f"Bearer {token}"
+
+    @staticmethod
+    def json_auth_for_local_storage(json_body: Any) -> dict[str, str]:
+        extracted = SessionManager.extract_token_from_json(json_body)
+        if not extracted:
+            return {}
+        key, token = extracted
+        return {key: token}
+
     async def login(self, auth_config: AuthConfig) -> bool:
         if self._session is None:
             await self.create_session()
 
+        forced_json = auth_config.login_body_format == "json"
         logger.info("로그인 시도: %s", auth_config.login_url)
         login_page = await self.get(auth_config.login_url)
 
         if not login_page:
-            logger.warning(
-                "로그인 페이지 GET 실패(타임아웃·연결 거부·DNS 등): %s",
-                auth_config.login_url,
-            )
-            return False
+            if forced_json:
+                logger.info(
+                    "JSON 로그인: 로그인 URL GET 실패 — API 직접 POST만 시도합니다: %s",
+                    auth_config.login_url,
+                )
+                html = ""
+            else:
+                logger.warning(
+                    "로그인 페이지 GET 실패(타임아웃·연결 거부·DNS 등): %s",
+                    auth_config.login_url,
+                )
+                return False
+        else:
+            html = login_page.get("text", "")
 
-        html = login_page.get("text", "")
+        body_format = self._resolve_login_body_format(auth_config, html)
         csrf_token = None
-        if auth_config.csrf_token_name:
+        if body_format != "json" and auth_config.csrf_token_name:
             csrf_token = self._extract_csrf_token(html, auth_config.csrf_token_name)
             if not csrf_token:
                 logger.warning(
@@ -174,24 +300,23 @@ class SessionManager:
                     auth_config.csrf_token_name,
                 )
 
-        login_data = {
-            auth_config.username_field: auth_config.username,
-            auth_config.password_field: auth_config.password,
-        }
+        login_data = self.build_login_payload(auth_config, csrf_token=csrf_token)
 
-        if auth_config.submit_field:
-            login_data[auth_config.submit_field] = auth_config.submit_field
-
-        if csrf_token and auth_config.csrf_token_name:
-            login_data[auth_config.csrf_token_name] = csrf_token
-
-        login_data.update(auth_config.extra_fields)
-
-        response = await self.post(
-            auth_config.login_url,
-            data=login_data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
-        )
+        if body_format == "json":
+            logger.info("JSON 본문으로 로그인 POST: %s", auth_config.login_url)
+            response = await self.post(
+                auth_config.login_url,
+                json_data=login_data,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+        else:
+            if auth_config.submit_field:
+                login_data[auth_config.submit_field] = auth_config.submit_field
+            response = await self.post(
+                auth_config.login_url,
+                data=login_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
 
         if not response:
             logger.warning(
@@ -203,6 +328,21 @@ class SessionManager:
         text = response.get("text", "")
         final_url = response.get("url", "")
         status = response.get("status")
+        json_body = response.get("json")
+
+        if body_format == "json" and self._json_login_failed(json_body):
+            logger.warning("JSON 로그인 API가 실패 응답을 반환했습니다.")
+            return False
+
+        if body_format == "json":
+            has_session_cookie = bool(response.get("cookies"))
+            if self._json_login_succeeded(json_body) or (
+                status in (200, 201, 204) and has_session_cookie
+            ):
+                self.apply_json_auth_token(json_body)
+                self._authenticated = True
+                logger.info("JSON 로그인 성공 (status=%s)", status)
+                return True
 
         redirect_url = self._extract_meta_redirect(text, auth_config.login_url)
         if redirect_url:
