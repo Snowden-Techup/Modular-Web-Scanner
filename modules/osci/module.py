@@ -32,7 +32,7 @@ class OSCiModule(BaseModule):
             self.target_os = "all"
         else:
             self.target_os = "Unix"
-            
+
         self.allow_redirects = False
         self.evasion_level = kwargs.get('evasion_level', 0)
         self.include_time_based = kwargs.get('include_time_based', False)
@@ -40,11 +40,13 @@ class OSCiModule(BaseModule):
         self.random_seed = kwargs.get('random_seed', 37)
         
         self._global_time_lock = asyncio.Lock()
-        self._fast_per_param = 0
-        self._known_targets = set()
-        self._total_fast_expected = 0
-        self._global_fast_completed = 0
         self._counter_lock = asyncio.Lock()
+        
+        self._fast_per_param = 0
+        self._time_per_param = 0
+        
+        self._global_completed_payloads = 0  # 완료된 페이로드 카운트
+        self._current_param_index = 1        # 현재 진행 중인 파라미터 번호
         
         # 이벤트 기반 장벽을 통해 시간 페이로드 직렬 처리
         self._barrier_event = asyncio.Event()
@@ -56,17 +58,9 @@ class OSCiModule(BaseModule):
         return "time-based" in attack_type or "time" in attack_type
 
     def get_target_parameters(self, surface: Any, all_params: Iterable[str]) -> Iterable[str]:
-        if self._fast_per_param == 0:
+        if self._fast_per_param == 0 and self._time_per_param == 0:
             self.get_payload_count()
-        params = list(all_params)
-        url = getattr(surface, "url", "")
-        method = getattr(surface, "method", "GET")
-        for p in params:
-            tid = (method, url, p)
-            if tid not in self._known_targets:
-                self._known_targets.add(tid)
-                self._total_fast_expected += self._fast_per_param
-        return params
+        return list(all_params)
 
     def get_payload_count(self) -> int:
         all_raw = get_osci_payloads(self.target_os)
@@ -80,11 +74,15 @@ class OSCiModule(BaseModule):
             selected_time_count = min(limit, time_c)
         
         multiplier = self.evasion_level + 1
+        
+        # 각 파라미터당 할당될 일반/시간 페이로드 개수 저장
         self._fast_per_param = fast_c * multiplier
-        return self._fast_per_param + (selected_time_count * multiplier)
+        self._time_per_param = selected_time_count * multiplier
+        
+        return self._fast_per_param + self._time_per_param
 
     def get_payloads(self) -> Iterator[Payload]:
-        if self._fast_per_param == 0: 
+        if self._fast_per_param == 0 and self._time_per_param == 0: 
             self.get_payload_count()
 
         filtered = get_osci_payloads(self.target_os)
@@ -132,7 +130,6 @@ class OSCiModule(BaseModule):
             if t_os == "Unix":
                 value = value.replace(" ", "${IFS}")
             else:
-                # Windows CMD/PHP 환경에서는 쉼표(,) 우회 사용, PowerShell은 제외
                 if "PS" not in action_level:
                     value = value.replace(" ", ",")
         
@@ -164,11 +161,12 @@ class OSCiModule(BaseModule):
                 await asyncio.sleep(2.0)
 
             try:
-                is_hit, evidences = detect_osci(
+                is_hit, evidences = await detect_osci(
                     response=response,
                     payload=payload,
                     elapsed_time=elapsed_time,
-                    original_res=original_res
+                    original_res=original_res,
+                    requester=requester
                 )
                 
                 if is_hit:
@@ -180,8 +178,13 @@ class OSCiModule(BaseModule):
                 return is_hit, evidences, payload
             finally:
                 async with self._counter_lock:
-                    self._global_fast_completed += 1
-                    if self._global_fast_completed >= self._total_fast_expected and self._total_fast_expected > 0:
+                    self._global_completed_payloads += 1
+                    
+                    n = self._current_param_index
+                    # n * (일반 페이로드 개수) + (n-1) * (시간 페이로드 개수)
+                    target_count = (n * self._fast_per_param) + ((n - 1) * self._time_per_param)
+                    
+                    if self._global_completed_payloads >= target_count:
                         if not self._barrier_event.is_set():
                             self._barrier_event.set()
 
@@ -200,14 +203,13 @@ class OSCiModule(BaseModule):
                         try:
                             await asyncio.wait_for(self._barrier_event.wait(), timeout=10.0)
                         except asyncio.TimeoutError:
-                            current_completed = self._global_fast_completed
+                            current_completed = self._global_completed_payloads
                             
                             if current_completed == last_completed:
                                 stuck_count += 1
                             else:
                                 stuck_count = 0
                                 last_completed = current_completed
-                            
                             # 30초(10초 * 3) 동안 일반 페이로드 완료 없으면 강제 돌파
                             if stuck_count >= 3:
                                 self._barrier_event.set()
@@ -215,6 +217,7 @@ class OSCiModule(BaseModule):
                         
                 if not self._time_phase_active:
                     self._time_phase_active = True
+                    await asyncio.sleep(4.5)
 
                 # 2. 전역 직렬 실행 락
                 async with self._global_time_lock:
@@ -226,14 +229,14 @@ class OSCiModule(BaseModule):
                         real_res = await requester(real_val)
                         real_elapsed = asyncio.get_event_loop().time() - start_ts
                         
-                        # 서버 회복 대기
                         await asyncio.sleep(4.5)
 
-                        is_hit, evidences = detect_osci(
+                        is_hit, evidences = await detect_osci(
                             response=real_res,
                             payload=actual_payload,
                             elapsed_time=real_elapsed,
-                            original_res=original_res
+                            original_res=original_res,
+                            requester=requester
                         )
 
                         if is_hit and "[Time]" not in str(evidences):
@@ -243,20 +246,23 @@ class OSCiModule(BaseModule):
                         return is_hit, evidences, actual_payload
 
                     except asyncio.TimeoutError:
-                        is_hit, evidences = detect_osci(
+                        is_hit, evidences = await detect_osci(
                             response=None,
                             payload=actual_payload,
                             elapsed_time=15.0,
-                            original_res=original_res
+                            original_res=original_res,
+                            requester=requester
                         )
                         return True, evidences, actual_payload
             finally:
                 async with self._counter_lock:
+                    self._global_completed_payloads += 1
                     self._time_attack_in_flight -= 1
                     if self._time_attack_in_flight == 0:
                         if self._time_phase_active:
-                            
                             self._barrier_event.clear()
                             self._time_phase_active = False
+                            self._current_param_index += 1
+                            await asyncio.sleep(30.0)
 
         return False, [], payload
