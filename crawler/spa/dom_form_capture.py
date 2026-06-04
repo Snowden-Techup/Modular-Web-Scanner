@@ -6,26 +6,53 @@ import logging
 from urllib.parse import urlparse
 
 from crawler.spa.capture_core import path_key_from_url, register_observed_body_field_hints
+from parsers.body_field_inference import sanitize_field_map
 
 logger = logging.getLogger(__name__)
 
 _COLLECT_FORM_FIELDS_JS = """() => {
     const fields = {};
+    const labels = {};
     const skipName = /^(csrf|_token|token|authenticity_token|submit|button|login|logout)$/i;
     const skipType = new Set(['submit', 'button', 'reset', 'image']);
     const idLike = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
     const dataAttrs = ['data-field', 'data-name', 'data-testid', 'data-test', 'data-cy'];
 
+    function looksLikeUrl(t) {
+        const s = String(t || '').trim().toLowerCase();
+        return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('//')
+            || (s.includes('://') && s.length >= 10);
+    }
+
+    function inferFromSemanticLabel(text) {
+        const t = String(text || '').trim();
+        if (!t) return '';
+        if (looksLikeUrl(t)) return 'url';
+        if (/(?:external|remote|reference|fetch|proxy|webhook|callback|redirect|foreign|embed|avatar|image|logo|src|href|외부|참조|연동|링크|이미지)/i.test(t)
+            && /(?:url|uri|link|endpoint|주소|링크)/i.test(t)) {
+            return 'external_url';
+        }
+        if (/^(?:url|uri|link|href|src|endpoint)$/i.test(t)) return 'url';
+        if (/\\b(?:e-?mail|email)\\b/i.test(t)) return 'email';
+        if (/\\b(?:phone|mobile|tel|연락|전화)\\b/i.test(t)) return 'phone';
+        if (/\\b(?:password|passwd|비밀)\\b/i.test(t)) return 'password';
+        if (/\\b(?:username|user_name|아이디)\\b/i.test(t)) return 'username';
+        if (/\\b(?:attachment|upload|첨부|파일)\\b/i.test(t)) return 'attachment';
+        return '';
+    }
+
     function slugify(text) {
         const raw = String(text || '').trim().slice(0, 80);
-        if (!raw) return '';
+        if (!raw || looksLikeUrl(raw)) return '';
         const slug = raw
             .toLowerCase()
             .replace(/[^\\w\\s-]+/g, ' ')
             .replace(/[\\s-]+/g, '_')
             .replace(/^_+|_+$/g, '')
             .slice(0, 64);
-        return slug && /^[a-z][a-z0-9_]*$/.test(slug) ? slug : '';
+        if (!slug || !/^[a-z][a-z0-9_]*$/.test(slug)) return '';
+        if (/^(?:https?|http)_|_com_|example_com|localhost/.test(slug)) return '';
+        return slug;
     }
 
     function labelTextForControl(el) {
@@ -40,8 +67,6 @@ _COLLECT_FORM_FIELDS_JS = """() => {
         if (parentLabel && parentLabel.innerText) return parentLabel.innerText.trim();
         const aria = (el.getAttribute('aria-label') || '').trim();
         if (aria) return aria;
-        const placeholder = (el.getAttribute('placeholder') || '').trim();
-        if (placeholder) return placeholder;
         return '';
     }
 
@@ -55,6 +80,8 @@ _COLLECT_FORM_FIELDS_JS = """() => {
         for (const attr of dataAttrs) {
             const v = (el.getAttribute(attr) || '').trim();
             if (!v) continue;
+            const semantic = inferFromSemanticLabel(v);
+            if (semantic) return semantic;
             const fromData = slugify(v) || (idLike.test(v) ? v.replace(/-/g, '_') : '');
             if (fromData) return fromData;
         }
@@ -63,10 +90,17 @@ _COLLECT_FORM_FIELDS_JS = """() => {
         const typeHints = { email: 'email', password: 'password', search: 'q', tel: 'phone', url: 'url' };
         if (typeHints[type]) return typeHints[type];
 
-        return slugify(labelTextForControl(el));
+        const label = labelTextForControl(el);
+        const placeholder = (el.getAttribute('placeholder') || '').trim();
+        const fromLabel = inferFromSemanticLabel(label);
+        if (fromLabel) return fromLabel;
+        if (looksLikeUrl(placeholder)) {
+            return fromLabel || 'url';
+        }
+        return slugify(label) || slugify(placeholder);
     }
 
-    function addField(name, value, el) {
+    function addField(name, value, el, labelHint) {
         const key = String(name || '').trim();
         if (!key || skipName.test(key)) return;
         const type = (el && (el.getAttribute('type') || 'text').toLowerCase()) || 'text';
@@ -76,17 +110,46 @@ _COLLECT_FORM_FIELDS_JS = """() => {
         if (!(key in fields) || !String(fields[key] || '').trim()) {
             fields[key] = val;
         }
+        if (labelHint && !(key in labels)) {
+            labels[key] = String(labelHint).slice(0, 200);
+        }
     }
 
     document.querySelectorAll('input, textarea, select').forEach((el) => {
         const type = (el.getAttribute('type') || 'text').toLowerCase();
         if (type === 'hidden' || type === 'file') return;
+        const label = labelTextForControl(el);
+        const placeholder = (el.getAttribute('placeholder') || '').trim();
         const key = inferFieldName(el);
-        if (key) addField(key, el.value, el);
+        if (key) addField(key, el.value, el, label || placeholder);
     });
 
-    return fields;
+    return { fields, labels };
 }"""
+
+
+def _normalize_dom_capture(raw: object) -> tuple[dict[str, str], dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}, {}
+
+    if "fields" in raw or "labels" in raw:
+        field_map = raw.get("fields") if isinstance(raw.get("fields"), dict) else {}
+        label_map = raw.get("labels") if isinstance(raw.get("labels"), dict) else {}
+    else:
+        field_map = raw
+        label_map = {}
+
+    label_hints = {
+        str(k): str(v)
+        for k, v in label_map.items()
+        if str(k).strip()
+    }
+    values = {
+        str(k).strip(): str(v)[:500]
+        for k, v in field_map.items()
+        if str(k).strip()
+    }
+    return sanitize_field_map(values, label_hints=label_hints), label_hints
 
 
 async def extract_visible_form_fields(page) -> dict[str, str]:
@@ -95,13 +158,8 @@ async def extract_visible_form_fields(page) -> dict[str, str]:
     except Exception as exc:
         logger.debug("[SPA Crawler] DOM form field capture failed: %s", exc)
         return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(k).strip(): str(v)[:500]
-        for k, v in raw.items()
-        if str(k).strip()
-    }
+    fields, _ = _normalize_dom_capture(raw)
+    return fields
 
 
 def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]) -> int:
@@ -109,6 +167,7 @@ def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]
     현재 클라이언트 라우트의 input/textarea name을 관련 API path_key에 병합.
     React controlled form은 XHR 전까지 body 샘플이 비는 경우가 많다.
     """
+    fields = sanitize_field_map(fields)
     if not fields:
         return 0
 
@@ -134,7 +193,7 @@ def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]
             if key_str not in bucket or not str(bucket.get(key_str) or "").strip():
                 bucket[key_str] = str(value)
         if len(bucket) > before or (before == 0 and bucket):
-            samples_map[path_key] = bucket
+            samples_map[path_key] = sanitize_field_map(bucket)
             updated += 1
         register_observed_body_field_hints(engine, path_key, fields.keys())
 
