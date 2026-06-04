@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -206,12 +207,21 @@ def _seed_default_user(db: Session) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
-    db = SessionLocal()
-    try:
-        _seed_default_user(db)
-    finally:
-        db.close()
+    last_error: Exception | None = None
+    for attempt in range(30):
+        try:
+            init_db()
+            db = SessionLocal()
+            try:
+                _seed_default_user(db)
+            finally:
+                db.close()
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"Database init failed after retries: {last_error}") from last_error
     yield
 
 
@@ -442,6 +452,11 @@ async def get_my_scans(
     }
 
 
+
+
+@app.get("/health")
+async def health_check() -> dict:
+    return {"status": "ok"}
 
 
 @app.get("/")

@@ -35,13 +35,11 @@ services:
       PYTHONPATH: /app
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
-    ports:
-      - "8000:8000"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)\"",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\"",
         ]
       interval: 10s
       timeout: 5s
@@ -69,7 +67,7 @@ services:
       db:
         condition: service_healthy
       web:
-        condition: service_started
+        condition: service_healthy
     restart: always
     cpus: "1.0"
     mem_limit: 3g
