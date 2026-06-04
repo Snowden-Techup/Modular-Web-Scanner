@@ -6,7 +6,11 @@ import json
 import re
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
-from parsers.body_field_inference import merge_path_inferred_fields
+from parsers.body_field_inference import (
+    is_plausible_field_name,
+    merge_path_inferred_fields,
+    sanitize_field_map,
+)
 from parsers.http_method_inference import infer_body_params_from_path, infer_http_method_from_path
 
 from crawler.spa.capture_core import (
@@ -356,20 +360,17 @@ def merge_observed_body_fields_for_family(
     SPA는 confirm/process 등 형제 엔드포인트마다 XHR 본문이 달라 한 path_key만으로는 필드가 비는 경우가 많다.
     """
     samples = getattr(engine, "observed_body_samples", None) or {}
-    merged = dict(local_fields or {})
-    merged.update(dict(samples.get(path_key) or {}))
+    merged = sanitize_field_map(local_fields)
+    merged.update(sanitize_field_map(samples.get(path_key) or {}))
 
     for sample_key, fields in samples.items():
         if not fields or sample_key == path_key:
             continue
         if not path_keys_share_body_field_family(path_key, sample_key):
             continue
-        for key, value in fields.items():
-            key_str = str(key).strip()
-            if not key_str:
-                continue
-            if key_str not in merged or not str(merged.get(key_str) or "").strip():
-                merged[key_str] = str(value)
+        for key, value in sanitize_field_map(fields).items():
+            if key not in merged or not str(merged.get(key) or "").strip():
+                merged[key] = str(value)
     return merged
 
 
@@ -397,7 +398,7 @@ def resolve_mutating_body_fields(
     if not fields and url:
         fields = infer_body_params_from_path(url)
     fields = hydrate_fields_from_source_context(fields, source_url)
-    return merge_path_inferred_fields(fields, path_key)
+    return merge_path_inferred_fields(sanitize_field_map(fields), path_key)
 
 
 def hydrate_fields_from_source_context(fields: dict[str, str], source_url: str) -> dict[str, str]:
