@@ -484,9 +484,11 @@ def register_observed_body_field_hints(
         engine.observed_body_samples = {}
         samples_map = engine.observed_body_samples
     bucket = samples_map.setdefault(path_key, {})
+    from parsers.body_field_inference import is_plausible_field_name
+
     for raw_name in field_names:
         key_str = str(raw_name).strip()
-        if not key_str:
+        if not key_str or not is_plausible_field_name(key_str):
             continue
         store_observed_sample(bucket, key_str, str(bucket.get(key_str) or ""))
 
