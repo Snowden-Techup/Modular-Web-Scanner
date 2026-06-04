@@ -71,6 +71,7 @@ _MULTIPART_NAME_RE = re.compile(
     r'content-disposition:\s*form-data;\s*name="([^"]+)"',
     re.IGNORECASE,
 )
+_MULTIPART_FILENAME_RE = re.compile(r"filename\s*=", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # URL normalization and API key helpers
@@ -349,6 +350,32 @@ def extract_multipart_boundary(body: str, content_type: str) -> str:
     return ""
 
 
+def parse_multipart_file_field_names(body: str, content_type: str) -> set[str]:
+    """Multipart parts that include a filename= attribute (file uploads)."""
+    if not body:
+        return set()
+    text = str(body)
+    ct = str(content_type or "").lower()
+    if "multipart/form-data" not in ct and not text.lstrip().startswith("--"):
+        return set()
+    boundary = extract_multipart_boundary(text, content_type)
+    if not boundary:
+        return set()
+    names: set[str] = set()
+    delimiter = f"--{boundary}"
+    for part in text.split(delimiter):
+        chunk = part.strip()
+        if not chunk or chunk == "--":
+            continue
+        header_block = chunk.split("\r\n\r\n", 1)[0] if "\r\n\r\n" in chunk else chunk.split("\n\n", 1)[0]
+        if not _MULTIPART_FILENAME_RE.search(header_block):
+            continue
+        name_match = _MULTIPART_NAME_RE.search(header_block)
+        if name_match:
+            names.add(str(name_match.group(1)).strip())
+    return names
+
+
 def parse_multipart_fields(body: str, content_type: str) -> dict[str, str]:
     if not body:
         return {}
@@ -409,7 +436,10 @@ def parse_payload_fields(post_data: str, content_type: str) -> dict[str, str]:
 def serialize_body_fields(fields: dict[str, str], content_type: str) -> tuple[str, str]:
     ct = str(content_type or "").lower().split(";", 1)[0].strip()
     clean = {str(k): str(v) for k, v in fields.items() if str(k).strip()}
-    if ct in ("application/x-www-form-urlencoded", "multipart/form-data"):
+    if ct == "multipart/form-data":
+        # Preserve observed field names; synthesized forms carry values separately.
+        return "", "multipart/form-data"
+    if ct == "application/x-www-form-urlencoded":
         return urlencode(clean, doseq=True), "application/x-www-form-urlencoded"
     return json.dumps(clean, ensure_ascii=False), "application/json"
 
@@ -441,9 +471,36 @@ def register_observed_query_keys(engine, url: str) -> None:
         store_observed_sample(samples, key_str, val)
 
 
+def register_observed_body_field_hints(
+    engine,
+    path_key: str,
+    field_names: set[str] | frozenset[str] | list[str],
+) -> None:
+    """XHR/DOM/JS 정적 분석에서 확인된 필드명을 path_key 샘플에 병합 (값은 빈 placeholder)."""
+    if not path_key or not field_names:
+        return
+    samples_map = getattr(engine, "observed_body_samples", None)
+    if samples_map is None:
+        engine.observed_body_samples = {}
+        samples_map = engine.observed_body_samples
+    bucket = samples_map.setdefault(path_key, {})
+    for raw_name in field_names:
+        key_str = str(raw_name).strip()
+        if not key_str:
+            continue
+        store_observed_sample(bucket, key_str, str(bucket.get(key_str) or ""))
+
+
+def _spa_path_keys_related(api_path_key: str, sample_key: str) -> bool:
+    from crawler.spa.path_family import spa_path_keys_related
+
+    return spa_path_keys_related(api_path_key, sample_key)
+
+
 def register_observed_body_keys(engine, url: str, post_data: str | None, content_type: str) -> None:
     fields = parse_payload_fields(post_data or "", content_type)
-    if not fields:
+    file_names = parse_multipart_file_field_names(post_data or "", content_type)
+    if not fields and not file_names:
         return
     path_key = path_key_from_url(url)
     names_map = getattr(engine, "observed_body_params", None)
@@ -459,6 +516,17 @@ def register_observed_body_keys(engine, url: str, post_data: str | None, content
     for key, val in fields.items():
         names.add(key)
         store_observed_sample(samples, key, val)
+    if file_names:
+        file_map = getattr(engine, "observed_body_file_fields", None)
+        if file_map is None:
+            engine.observed_body_file_fields = {}
+            file_map = engine.observed_body_file_fields
+        file_bucket = file_map.setdefault(path_key, set())
+        file_bucket.update(file_names)
+        names.update(file_names)
+        for key in file_names:
+            if key not in samples:
+                samples[key] = ""
     if content_type:
         ct_map = getattr(engine, "observed_body_content_types", None)
         if ct_map is None:
@@ -516,6 +584,17 @@ def drop_get_stubs_for_path(engine, path_key: str) -> None:
         del engine.api_endpoints[existing_hash]
 
 
+def _merge_api_file_fields(entry: dict, post_data: str | None, req_content_type: str) -> None:
+    discovered = parse_multipart_file_field_names(post_data or "", req_content_type or "")
+    if not discovered:
+        return
+    merged = set(entry.get("file_fields") or ())
+    merged.update(discovered)
+    entry["file_fields"] = sorted(merged)
+    if not entry.get("req_content_type") or "json" in str(entry.get("req_content_type")).lower():
+        entry["req_content_type"] = req_content_type or "multipart/form-data"
+
+
 def record_api_candidate(
     engine,
     *,
@@ -558,6 +637,7 @@ def record_api_candidate(
             existing["depth"] = int(getattr(engine, "current_route_depth", 0) or 0)
         if source and existing.get("source") == "js-static":
             existing["source"] = source
+        _merge_api_file_fields(existing, post_data, req_content_type)
         return api_hash, False
     if source == "js-static":
         # Snapshot items to avoid size-change errors while network callbacks update endpoints.
@@ -581,7 +661,9 @@ def record_api_candidate(
         "status": status,
         "content_type": content_type,
         "depth": int(getattr(engine, "current_route_depth", 0) or 0),
+        "file_fields": [],
     }
+    _merge_api_file_fields(engine.api_endpoints[api_hash], post_data, req_content_type)
     if str(method).upper() in _MUTATING_METHODS and post_data:
         drop_get_stubs_for_path(engine, path_key_from_url(url))
     return api_hash, True
@@ -774,10 +856,24 @@ def build_synthesized_html(engine, final_html: str, graphql_html: str) -> str:
         method = api["method"].upper()
         action = html.escape(api["url"], quote=True)
         fallback_ct = fallback_content_type_for_api(api)
-        ct = html.escape(fallback_ct or "application/json", quote=True)
+        req_ct_raw = str(api.get("req_content_type") or "").strip()
+        ct_base = (
+            req_ct_raw.split(";", 1)[0].strip().lower()
+            if req_ct_raw
+            else str(fallback_ct or "application/json").lower()
+        )
+        path_key = path_key_from_url(api["url"])
+        file_fields: set[str] = set(api.get("file_fields") or ())
+        observed_file_map = getattr(engine, "observed_body_file_fields", None) or {}
+        file_fields.update(observed_file_map.get(path_key) or ())
+        if file_fields:
+            ct_base = "multipart/form-data"
+        ct = html.escape(ct_base or "application/json", quote=True)
+        form_enctype_attr = (
+            ' enctype="multipart/form-data"' if ct_base == "multipart/form-data" else ""
+        )
         inputs = ""
         parsed = urlparse(api["url"])
-        path_key = path_key_from_url(api["url"])
         inferred_flag = False
         if method == "GET":
             query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -793,8 +889,30 @@ def build_synthesized_html(engine, final_html: str, graphql_html: str) -> str:
                 body_fields = parse_payload_fields(post_data, api.get("req_content_type") or "")
             if not body_fields:
                 body_fields = dict((observed_body or {}).get(path_key) or {})
+            from crawler.spa.capture_enrichment import resolve_mutating_body_fields
+
+            body_fields = resolve_mutating_body_fields(
+                engine,
+                path_key,
+                local_fields=body_fields,
+                source_url=str(api.get("source_url") or ""),
+                url=str(api.get("url") or ""),
+            )
+        rendered_names: set[str] = set()
         for key, val in body_fields.items():
-            inputs += f'  <input name="{html.escape(str(key), quote=True)}" value="{html.escape(str(val), quote=True)}">\n'
+            rendered_names.add(str(key))
+            if str(key) in file_fields:
+                inputs += f'  <input type="file" name="{html.escape(str(key), quote=True)}">\n'
+            else:
+                inputs += (
+                    f'  <input name="{html.escape(str(key), quote=True)}" '
+                    f'value="{html.escape(str(val), quote=True)}">\n'
+                )
+        for key in sorted(file_fields):
+            if key in rendered_names:
+                continue
+            rendered_names.add(key)
+            inputs += f'  <input type="file" name="{html.escape(str(key), quote=True)}">\n'
         if post_data and not body_fields:
             try:
                 post_json = json.loads(post_data)
@@ -828,7 +946,8 @@ def build_synthesized_html(engine, final_html: str, graphql_html: str) -> str:
         data_resp_ct = html.escape(str(fallback_ct or ""), quote=True)
         data_inferred = "true" if (method == "GET" and inferred_flag) else "false"
         synthesized += (
-            f'<form action="{action}" method="{html_method}" data-original-method="{method}" '
+            f'<form action="{action}" method="{html_method}"{form_enctype_attr} '
+            f'data-original-method="{method}" '
             f'data-content-type="{ct}" data-source-kind="{data_source}" '
             f'data-route-context="{data_route}" data-source-url="{data_source_url}" '
             f'data-depth="{data_depth}" data-response-headers="{data_resp_headers}" '

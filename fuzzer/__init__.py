@@ -1,5 +1,11 @@
 from .engine import AttackJob, AttackModule, EngineStats, Finding, FuzzerEngine
-from .auth_provider import ScanAuthProvider, create_scan_auth_provider, scan_auth_lifecycle
+from .auth_provider import (
+    ScanAuthProvider,
+    collect_cookies_from_surfaces,
+    create_scan_auth_provider,
+    merge_scan_cookies,
+    scan_auth_lifecycle,
+)
 from .request_builder import (
     FuzzerResponse,
     build_and_send_request,
@@ -18,7 +24,9 @@ __all__ = [
     "send_baseline_request",
     "FuzzerResponse",
     "ScanAuthProvider",
+    "collect_cookies_from_surfaces",
     "create_scan_auth_provider",
+    "merge_scan_cookies",
     "set_auth_provider",
     "get_auth_provider",
     "scan_auth_lifecycle",

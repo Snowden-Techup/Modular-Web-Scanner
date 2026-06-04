@@ -18,7 +18,7 @@ from cli.options import parse_bf_length, parse_cookies
 from cli.runner import prepare_scan_context
 from cli.surfaces import resolve_surfaces
 from fuzzer import FuzzerEngine
-from fuzzer.auth_provider import scan_auth_lifecycle
+from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request, set_graphql_safe_mode
 from reporter import ReportGenerator
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
@@ -471,7 +471,8 @@ async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
             SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
         )
 
-        async with scan_auth_lifecycle(args, base_cookies=cookies):
+        scan_cookies = merge_scan_cookies(args, surfaces)
+        async with scan_auth_lifecycle(args, base_cookies=scan_cookies, surfaces=surfaces):
             scan_task = asyncio.create_task(
                 engine.run_with_attack_modules(
                     surfaces=surfaces,
