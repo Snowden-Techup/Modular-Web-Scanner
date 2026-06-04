@@ -368,6 +368,29 @@
       color: #e0f2fe;
       font-variant-numeric: tabular-nums;
     }
+    .scan-phase-badge {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: #67e8f9;
+      background: rgba(34, 211, 238, 0.12);
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      border-radius: 999px;
+      padding: 3px 10px;
+      animation: phase-pulse 1.6s ease-in-out infinite;
+    }
+    .scan-phase-badge[hidden] {
+      display: none !important;
+      animation: none;
+    }
+    @keyframes phase-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.65; }
+    }
+    .progress-stats.is-pre-fuzzing .progress-stat strong {
+      color: #64748b;
+    }
     .progress-track {
       height: 8px;
       border-radius: 999px;
@@ -1261,12 +1284,13 @@
       <div class="scan-progress-compact">
         <div class="scan-progress-compact-top">
           <span id="scanMeta">scan_id: (없음)</span>
+          <span id="scanPhaseLabel" class="scan-phase-badge" hidden>크롤링 중</span>
           <span class="progress-percent-inline" id="scanProgressPercent">0.0%</span>
         </div>
         <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="scanProgressTrack">
           <div class="progress-fill" id="scanProgressFill"></div>
         </div>
-        <div class="progress-stats">
+        <div class="progress-stats" id="progressStats">
           <div class="progress-stat">
             <span class="muted">전체</span>
             <strong id="statTotal">—</strong>
@@ -1335,6 +1359,8 @@
     const scanProgressPercent = document.getElementById("scanProgressPercent");
     const scanProgressFill = document.getElementById("scanProgressFill");
     const scanProgressTrack = document.getElementById("scanProgressTrack");
+    const scanPhaseLabel = document.getElementById("scanPhaseLabel");
+    const progressStats = document.getElementById("progressStats");
     const statTotal = document.getElementById("statTotal");
     const statSuccess = document.getElementById("statSuccess");
     const statFail = document.getElementById("statFail");
@@ -1478,7 +1504,50 @@
       return { effectiveTotal, completed, failures, success };
     }
 
+    function resolveScanPhase(scan) {
+      const phase = scan.summary?.phase;
+      if (phase === "crawling") return "crawling";
+      if (phase === "queued" || scan.status === "queued") return "queued";
+      if (
+        scan.status === "running"
+        && !scan.total_requests
+        && Number(scan.summary?.completed ?? 0) === 0
+      ) {
+        return "crawling";
+      }
+      return phase || scan.status || "";
+    }
+
+    function formatStatusLabel(scan) {
+      const phase = resolveScanPhase(scan);
+      if (phase === "crawling") return "크롤링 중";
+      if (phase === "queued") return "대기 중";
+      if (phase === "fuzzing" || scan.status === "running") return "퍼징 중";
+      if (scan.status === "completed") return "완료";
+      if (scan.status === "failed") return "실패";
+      return scan.status || "-";
+    }
+
     function updateScanProgressUI(scan) {
+      const phase = resolveScanPhase(scan);
+      const isPreFuzzing = phase === "crawling" || phase === "queued";
+
+      if (isPreFuzzing) {
+        scanPhaseLabel.hidden = false;
+        scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
+        scanProgressPercent.textContent = "—";
+        scanProgressFill.style.width = "0%";
+        scanProgressTrack.setAttribute("aria-valuenow", "0");
+        statTotal.textContent = "—";
+        statSuccess.textContent = "—";
+        statFail.textContent = "—";
+        progressStats.classList.add("is-pre-fuzzing");
+        return;
+      }
+
+      scanPhaseLabel.hidden = true;
+      progressStats.classList.remove("is-pre-fuzzing");
+
       const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);
 
       statTotal.textContent = String(effectiveTotal);
@@ -1708,8 +1777,10 @@
 
     function renderReport(scan) {
       reportScanId.textContent  = `scan_id: ${scan.scan_id || "(없음)"}`;
-      reportStatus.textContent  = scan.status || "-";
-      reportProgress.textContent = formatProgressPercent(scan);
+      reportStatus.textContent  = formatStatusLabel(scan);
+      reportProgress.textContent = resolveScanPhase(scan) === "crawling" || resolveScanPhase(scan) === "queued"
+        ? "—"
+        : formatProgressPercent(scan);
       reportTarget.textContent  = scan.target || scan.request?.url || "-";
 
       const reportVulns  = scan.report_json?.vulnerabilities || [];
@@ -2042,7 +2113,7 @@
         scanMeta.textContent = `scan_id: ${lastScanId}`;
         reportScanId.textContent = `scan_id: ${lastScanId}`;
         reportTarget.textContent = data.request?.url || "-";
-        reportStatus.textContent = "queued";
+        reportStatus.textContent = "대기 중";
         reportProgress.textContent = "0.0%";
         reportFindings.textContent = "0";
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
@@ -2050,7 +2121,7 @@
           status: "queued",
           progress_percent: 0,
           progress: 0,
-          summary: {},
+          summary: { phase: "queued" },
           total_requests: null
         });
         if (pollTimer) clearInterval(pollTimer);

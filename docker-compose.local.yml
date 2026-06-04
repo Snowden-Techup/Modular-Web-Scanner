@@ -1,0 +1,8 @@
+# Local overlay: HTTP only (no Let's Encrypt on the host)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+services:
+  nginx:
+    ports: !override
+      - "80:80"
+    volumes: !override
+      - ./nginx/nginx.local.conf:/etc/nginx/nginx.conf:ro

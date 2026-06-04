@@ -238,7 +238,18 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     from reporter import ReportGenerator
 
     started_at = time.monotonic()
-    await _scan_update(scan_id, status="running")
+    await _scan_update(
+        scan_id,
+        status="running",
+        summary={
+            "phase": "crawling",
+            "queued": 0,
+            "completed": 0,
+            "failures": 0,
+            "findings": 0,
+            "elapsed_time": 0.0,
+        },
+    )
     args = _build_args_from_payload(request_payload)
     runtime_output = _runtime_scan_report_path(scan_id)
     runtime_output.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +312,20 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         )
 
     total_requests = max(1, context["total_requests"])
-    await _scan_update(scan_id, total_requests=total_requests)
+    await _scan_update(
+        scan_id,
+        total_requests=total_requests,
+        summary={
+            "phase": "fuzzing",
+            "queued": 0,
+            "completed": 0,
+            "failures": 0,
+            "findings": 0,
+            "elapsed_time": round(time.monotonic() - started_at, 2),
+            "total_requests": total_requests,
+            "planned_requests": total_requests,
+        },
+    )
 
     last_logged_progress = -1.0
     last_db_sync_at = 0.0
@@ -322,6 +346,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 progress_pct = 99.9
 
             summary = {
+                "phase": "fuzzing",
                 "queued": queued_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
@@ -406,6 +431,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         progress=100,
         progress_percent=100.0,
         summary={
+            "phase": "completed",
             "queued": stats.queued,
             "completed": stats.completed,
             "failures": stats.failures,

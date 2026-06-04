@@ -2,6 +2,7 @@ aiohttp
 beautifulsoup4
 celery[redis]
 fastapi
+playwright
 PyJWT
 pydantic
 psycopg[binary]

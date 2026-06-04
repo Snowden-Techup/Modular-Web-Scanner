@@ -387,6 +387,7 @@ async def start_scan(
         progress_percent=0.0,
         request_payload=request_payload,
         summary={
+            "phase": "queued",
             "queued": 0,
             "completed": 0,
             "failures": 0,
