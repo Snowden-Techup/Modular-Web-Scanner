@@ -70,7 +70,7 @@ class AuthSettings(BaseModel):
 
 
 class CrawlerOptions(BaseModel):
-    crawl_mode: Literal["static", "dynamic", "hybrid"] = "hybrid"
+    crawl_mode: Literal["static", "dynamic", "hybrid"] = "static"
     spa_max_routes: int = Field(default=50, ge=1, le=500)
     unsafe_click: bool = False
     local_storage: str = "{}"
@@ -373,7 +373,7 @@ async def get_schema() -> dict:
             "oob_retries": 3,
             "oob_poll_delay": 5.0,
             "oob_poll_timeout": 10.0,
-            "crawl_mode": "hybrid",
+            "crawl_mode": "static",
             "spa_max_routes": 50,
             "local_storage": "{}",
         },

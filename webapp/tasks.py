@@ -117,7 +117,7 @@ def _build_args_from_payload(payload: dict) -> Namespace:
         type=payload.get("scan_type") or payload.get("type") or "all",
         session_pool_size=int(engine.get("session_pool_size", 3)),
         level=level,
-        crawl_mode=crawler.get("crawl_mode", "hybrid"),
+        crawl_mode=crawler.get("crawl_mode", "static"),
         spa_max_routes=int(crawler.get("spa_max_routes", 50)),
         local_storage=crawler.get("local_storage", "{}"),
         unsafe_click=bool(crawler.get("unsafe_click", False)),
