@@ -315,6 +315,8 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     await _scan_update(
         scan_id,
         total_requests=total_requests,
+        progress=0,
+        progress_percent=0.0,
         summary={
             "phase": "fuzzing",
             "queued": 0,
@@ -328,6 +330,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     )
 
     last_logged_progress = -1.0
+    last_shown_progress = 0.0
     last_db_sync_at = 0.0
     bf_true_random_milestone_logs = args.type == "bruteforce" and bool(getattr(args, "bf_true_random", False))
     next_milestone = SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
@@ -341,9 +344,12 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             queued_total = engine.stats.queued
             effective_total = max(total_requests, queued_total, 1)
             completed = engine.stats.completed
-            progress_pct = min(100.0, round(completed / effective_total * 100, 1))
-            if not scan_task.done() and progress_pct >= 99.9:
-                progress_pct = 99.9
+            raw_progress_pct = min(100.0, round(completed / effective_total * 100, 1))
+            if not scan_task.done() and raw_progress_pct >= 99.9:
+                raw_progress_pct = 99.9
+            # queued grows while surfaces are submitted (await queue.put yields); keep UI monotonic.
+            progress_pct = max(last_shown_progress, raw_progress_pct)
+            last_shown_progress = progress_pct
 
             summary = {
                 "phase": "fuzzing",

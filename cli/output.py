@@ -10,12 +10,14 @@ async def progress_printer(
     total_requests: int,
     scan_task: asyncio.Task,
 ) -> None:
+    last_shown = 0.0
     while not scan_task.done():
         effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
         completed = engine.stats.completed
-        percent = min(100.0, (completed / effective_total) * 100)
+        raw = min(99.9, (completed / effective_total) * 100)
+        last_shown = max(last_shown, raw)
         print(
-            f"\rProgress: {percent:6.2f}% ({completed}/{effective_total})",
+            f"\rProgress: {last_shown:6.2f}% ({completed}/{effective_total})",
             end="",
             flush=True,
         )
@@ -23,7 +25,7 @@ async def progress_printer(
 
     effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
     completed = engine.stats.completed
-    percent = min(100.0, (completed / effective_total) * 100)
+    percent = 100.0
     print(
         f"\rProgress: {percent:6.2f}% ({completed}/{effective_total})",
         end="",

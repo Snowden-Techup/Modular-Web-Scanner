@@ -1420,6 +1420,7 @@
     const detailPanelOob = document.getElementById("detailPanelOob");
     const moduleDetailHint = document.getElementById("moduleDetailHint");
     let lastScanId = "";
+    let displayedProgressPercent = 0;
     let pollTimer = null;
     let accessToken = localStorage.getItem("mws_access_token") || "";
     let currentUsername = localStorage.getItem("mws_username") || "";
@@ -1527,8 +1528,10 @@
       if (phase === "queued" || scan.status === "queued") return "queued";
       if (
         scan.status === "running"
+        && scan.summary?.phase !== "fuzzing"
         && !scan.total_requests
         && Number(scan.summary?.completed ?? 0) === 0
+        && !(typeof scan.progress_percent === "number" && scan.progress_percent > 0)
       ) {
         return "crawling";
       }
@@ -1550,6 +1553,7 @@
       const isPreFuzzing = phase === "crawling" || phase === "queued";
 
       if (isPreFuzzing) {
+        displayedProgressPercent = 0;
         scanPhaseLabel.hidden = false;
         scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
         scanProgressPercent.textContent = "—";
@@ -1579,7 +1583,13 @@
       } else {
         pct = Number(scan.progress ?? 0);
       }
-      if (scan.status === "completed") pct = 100;
+      if (scan.status === "completed") {
+        pct = 100;
+        displayedProgressPercent = 100;
+      } else {
+        pct = Math.max(displayedProgressPercent, pct);
+        displayedProgressPercent = pct;
+      }
       pct = Math.min(100, Math.max(0, pct));
 
       scanProgressPercent.textContent = `${pct.toFixed(1)}%`;
@@ -2150,6 +2160,7 @@
         reportFindings.textContent = payload.scan_type || "all";
         setFindingCount(null);
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
+        displayedProgressPercent = 0;
         updateScanProgressUI({
           status: "queued",
           progress_percent: 0,
