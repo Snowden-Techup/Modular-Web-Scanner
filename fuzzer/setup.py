@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core import AttackSurface
+from fuzzer.engine import FuzzerEngine
 from modules.bruteforce.module import BruteforceModule
 from modules.lfi.module import LFIModule
 from modules.file_upload.module import FileUploadModule
@@ -122,7 +123,8 @@ def estimate_total_requests(surfaces: list[AttackSurface], modules: list) -> int
     
     total = 0
     for surface in surfaces:
-        all_params = tuple(getattr(surface, "parameters", {}).keys())
+        # Engine submit path uses _iter_parameters (dynamic CSRF tokens excluded).
+        all_params = tuple(FuzzerEngine._iter_parameters(surface))
         for module in modules:
             module_params = all_params
             selector = getattr(module, "get_target_parameters", None)

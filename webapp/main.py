@@ -1,31 +1,46 @@
 from __future__ import annotations
 
-from argparse import Namespace
-import asyncio
-import json
+import hashlib
+import os
+import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi import Depends, Header, status
+from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import jwt
 
-from cli.options import parse_bf_length, parse_cookies
-from cli.runner import prepare_scan_context
-from cli.surfaces import resolve_surfaces
-from fuzzer import FuzzerEngine
-from fuzzer.auth_provider import scan_auth_lifecycle
-from fuzzer.request_builder import build_and_send_request, set_graphql_safe_mode
-from reporter import ReportGenerator
-from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
-from reporter.generator import _finding_sort_key
+from modules.oob.client import DEFAULT_OAST_SERVER_URL
+from webapp.celery_app import celery_app  # noqa: F401 — Celery 앱 등록
+from webapp.database import get_db, init_db
+from webapp.database import SessionLocal
+from webapp.db_service import (
+    MAX_SCAN_HISTORY_PER_USER,
+    findings_from_rows,
+    get_scan_for_owner,
+    prune_scan_history,
+    scan_to_dict,
+    scan_to_summary_dict,
+)
+from webapp.models import Scan, User
+from webapp.tasks import run_scan as celery_run_scan
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRES_MINUTES = int(os.getenv("JWT_EXPIRES_MINUTES", "1440"))
 
 SCAN_TYPES = [
     "all",
@@ -40,10 +55,6 @@ SCAN_TYPES = [
     "oob",
 ]
 
-# Web UI: true-random bruteforce는 total_requests 대비 진행률이 오래 안 바뀌는 경우가 있어
-# 이 모드에서만 N건 단위 보조 로그를 남긴다. (그 외는 진행률% 변경 시만 로그)
-SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
-
 
 class AuthSettings(BaseModel):
     login_url: str = ""
@@ -52,14 +63,14 @@ class AuthSettings(BaseModel):
     password: str = ""
     username_field: str = "username"
     password_field: str = "password"
-    csrf_field: str = "user_token"
-    submit_field: str = "Login"
+    csrf_field: str = ""
+    submit_field: str = ""
     login_json: bool = False
     login_body_format: Literal["auto", "form", "json"] = "auto"
 
 
 class CrawlerOptions(BaseModel):
-    crawl_mode: Literal["static", "dynamic", "hybrid"] = "hybrid"
+    crawl_mode: Literal["static", "dynamic", "hybrid"] = "static"
     spa_max_routes: int = Field(default=50, ge=1, le=500)
     unsafe_click: bool = False
     local_storage: str = "{}"
@@ -165,10 +176,60 @@ class ScanRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+def _seed_default_user(db: Session) -> None:
+    if not DEFAULT_ADMIN_USERNAME:
+        return
+    exists = (
+        db.query(User).filter(User.username == DEFAULT_ADMIN_USERNAME).first()
+    )
+    if exists is not None:
+        return
+    salt = secrets.token_hex(16)
+    db.add(
+        User(
+            username=DEFAULT_ADMIN_USERNAME,
+            salt=salt,
+            password_hash=_hash_password(DEFAULT_ADMIN_PASSWORD, salt),
+        )
+    )
+    db.commit()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    last_error: Exception | None = None
+    for attempt in range(30):
+        try:
+            init_db()
+            db = SessionLocal()
+            try:
+                _seed_default_user(db)
+            finally:
+                db.close()
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"Database init failed after retries: {last_error}") from last_error
+    yield
+
+
 app = FastAPI(
     title="Modular Web Scanner API",
     description="Web UI backend connected to the real CLI scan pipeline.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -179,7 +240,116 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-scans_db: dict[str, dict] = {}
+DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin1234")
+
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def _create_access_token(user_id: int, username: str) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRES_MINUTES)
+    payload = {
+        "sub": str(user_id),
+        "username": username,
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def _parse_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header is required.",
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Use Authorization: Bearer <token>.",
+        )
+    return token
+
+
+def _get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    token = _parse_bearer_token(authorization)
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+        ) from exc
+
+    raw_user_id = payload.get("sub")
+    try:
+        user_id = int(raw_user_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token subject.",
+        ) from exc
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found.",
+        )
+    return user
+
+
+@app.post("/api/auth/register")
+async def register_user(req: RegisterRequest, db: Session = Depends(get_db)) -> dict:
+    normalized_username = req.username.strip().lower()
+    if not normalized_username:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    if db.query(User).filter(User.username == normalized_username).first():
+        raise HTTPException(status_code=409, detail="Username already exists.")
+
+    salt = secrets.token_hex(16)
+    user = User(
+        username=normalized_username,
+        salt=salt,
+        password_hash=_hash_password(req.password, salt),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"status": "created", "user_id": user.id, "username": user.username}
+
+
+@app.post("/api/auth/login")
+async def login_user(req: LoginRequest, db: Session = Depends(get_db)) -> dict:
+    normalized_username = req.username.strip().lower()
+    user = db.query(User).filter(User.username == normalized_username).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    expected_hash = _hash_password(req.password, user.salt)
+    if expected_hash != user.password_hash:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    token = _create_access_token(user.id, user.username)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "username": user.username},
+        "expires_in_minutes": JWT_EXPIRES_MINUTES,
+    }
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: User = Depends(_get_current_user)) -> dict:
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "created_at": current_user.created_at.timestamp(),
+    }
 
 
 @app.get("/api/schema")
@@ -203,7 +373,7 @@ async def get_schema() -> dict:
             "oob_retries": 3,
             "oob_poll_delay": 5.0,
             "oob_poll_timeout": 10.0,
-            "crawl_mode": "hybrid",
+            "crawl_mode": "static",
             "spa_max_routes": 50,
             "local_storage": "{}",
         },
@@ -211,369 +381,82 @@ async def get_schema() -> dict:
 
 
 @app.post("/api/scan/start")
-async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks) -> dict:
+async def start_scan(
+    req: ScanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+) -> dict:
     scan_id = str(uuid4())
-    now = time.time()
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
-        "status": "queued",
-        "progress": 0,
-        "progress_percent": 0.0,
-        "created_at": now,
-        "updated_at": now,
-        "request": req.model_dump(by_alias=True),
-        "target": req.target_url,
-        "findings": [],
-        "summary": {
+    request_payload = req.model_dump(by_alias=True)
+    scan = Scan(
+        scan_id=scan_id,
+        owner_id=current_user.id,
+        target_url=req.target_url,
+        status="queued",
+        progress=0,
+        progress_percent=0.0,
+        request_payload=request_payload,
+        summary={
+            "phase": "queued",
             "queued": 0,
             "completed": 0,
             "failures": 0,
             "findings": 0,
             "elapsed_time": 0.0,
         },
-        "logs": [],
-        "report_json": None,
-        "result": None,
-        "total_requests": None,
-        "progress_percent": 0.0,
-    }
-    background_tasks.add_task(_run_real_scan, scan_id, req)
+        logs=[],
+    )
+    db.add(scan)
+    db.commit()
+    prune_scan_history(db, current_user.id, keep=MAX_SCAN_HISTORY_PER_USER)
+    # Celery 큐로 작업 위임 — FastAPI는 즉시 응답
+    celery_run_scan.delay(scan_id, request_payload)
     return {
         "status": "accepted",
-        "message": "Scan registered in queue.",
+        "message": "Scan queued to Celery worker.",
         "scan_id": scan_id,
-        "request": req.model_dump(by_alias=True),
+        "request": request_payload,
     }
 
 
 @app.get("/api/scan/{scan_id}")
-async def get_scan(scan_id: str) -> dict:
-    scan = scans_db.get(scan_id)
+async def get_scan(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+) -> dict:
+    scan = get_scan_for_owner(db, scan_id, current_user.id)
     if scan is None:
         raise HTTPException(status_code=404, detail="Scan ID not found")
-    return scan
+    findings_rows = findings_from_rows(scan.findings)
+    return scan_to_dict(scan, findings_rows)
 
 
-def _resolve_login_body_format(auth: AuthSettings) -> str:
-    if auth.login_json:
-        return "json"
-    return auth.login_body_format
-
-
-def _apply_spa_runtime_options(
-    args: Namespace,
-    *,
-    on_warning: Callable[[str], None] | None = None,
-) -> None:
-    """CLI main.py와 동일한 SPA/GraphQL 런타임 설정."""
-    if getattr(args, "graphql_unsafe", False):
-        if on_warning:
-            on_warning(
-                "GraphQL unsafe mode: mutations will be attacked; "
-                "server/database state may change."
-            )
-        set_graphql_safe_mode(False)
-    else:
-        set_graphql_safe_mode(True)
-    if getattr(args, "unsafe_click", False) and on_warning:
-        on_warning(
-            "SPA unsafe click: non-submit UI buttons may be clicked "
-            "(higher coverage; logout/session loss risk)."
-        )
-    if getattr(args, "fuzz_csrf", False) and on_warning:
-        on_warning(
-            "CSRF fuzzing: dynamic-token surfaces will be attacked "
-            "(slower; may invalidate sessions)."
-        )
-    if getattr(args, "fuzz_auth", False) and on_warning:
-        on_warning(
-            "Auth endpoint fuzzing: login/token surfaces will be attacked "
-            "(may invalidate sessions or lock accounts)."
-        )
-
-
-def _build_cli_args(req: ScanRequest) -> Namespace:
-    bf_min_length = req.bruteforce.bf_min_length
-    bf_max_length = req.bruteforce.bf_max_length
-    if req.bruteforce.bf_length.strip():
-        bf_min_length, bf_max_length = parse_bf_length(
-            req.bruteforce.bf_length,
-            req.bruteforce.bf_max_length,
-        )
-
-    level = req.level
-    sqli_evasion_level = level
-    osci_evasion_level = req.osci.evasion_level
-    lfi_evasion_level = level
-    ssrf_evasion_level = min(level, 2)
-    sxss_evasion_level = level
-    rxss_evasion_level = req.reflected_xss.evasion_level
-    crawler = req.crawler
-    login_body_format = _resolve_login_body_format(req.auth)
-
-    return Namespace(
-        # Core scan options
-        url=req.target_url,
-        rps=req.engine.rps,
-        cookie=req.auth.cookie,
-        login_url=req.auth.login_url,
-        username=req.auth.username,
-        password=req.auth.password,
-        username_field=req.auth.username_field,
-        password_field=req.auth.password_field,
-        csrf_field=req.auth.csrf_field,
-        submit_field=req.auth.submit_field,
-        login_json=req.auth.login_json,
-        login_body_format=login_body_format,
-        output=req.engine.output,
-        surfaces_output=req.engine.surfaces_output,
-        type=req.scan_type,
-        session_pool_size=req.engine.session_pool_size,
-        level=level,
-        # SPA / crawler
-        crawl_mode=crawler.crawl_mode,
-        spa_max_routes=crawler.spa_max_routes,
-        local_storage=crawler.local_storage,
-        unsafe_click=crawler.unsafe_click,
-        exclude_urls=list(crawler.exclude_urls),
-        fuzz_csrf=crawler.fuzz_csrf,
-        fuzz_auth=crawler.fuzz_auth,
-        graphql_unsafe=crawler.graphql_unsafe,
-        exclude_auth_paths=list(crawler.exclude_auth_paths),
-        # Bruteforce options
-        bf_wordlist=req.bruteforce.bf_wordlist,
-        bf_disable_mutation=req.bruteforce.bf_disable_mutation,
-        bf_mutation_level=req.bruteforce.bf_mutation_level,
-        bf_true_random=req.bruteforce.bf_true_random,
-        bf_charset=req.bruteforce.bf_charset,
-        bf_min_length=bf_min_length,
-        bf_max_length=bf_max_length,
-        bf_length=req.bruteforce.bf_length,
-        bf_max_dictionary=req.bruteforce.bf_max_dictionary,
-        bf_max_true_random=req.bruteforce.bf_max_true_random,
-        bf_stop_on_first_hit=req.bruteforce.bf_stop_on_first_hit,
-        bf_target_url=req.bruteforce.bf_target_url,
-        bf_method=req.bruteforce.bf_method,
-        bf_fuzz_param=req.bruteforce.bf_fuzz_param,
-        bf_target_param=req.bruteforce.bf_target_param,
-        bf_username_param=req.bruteforce.bf_username_param,
-        bf_username=req.bruteforce.bf_username,
-        bf_extra_params=req.bruteforce.bf_extra_params,
-        # SQLi / OSCi / LFI / SSRF (names aligned with cli.parser / fuzzer.setup)
-        sqli_evasion_level=sqli_evasion_level,
-        sqli_time_based=req.sqli.include_time_based,
-        sqli_time_max=req.sqli.max_time_payloads,
-        target_dbms=req.sqli.target_dbms,
-        osci_evasion_level=osci_evasion_level,
-        osci_time_based=req.osci.include_time_based,
-        osci_time_max=req.osci.max_time_payloads,
-        target_os=req.osci.target_os,
-        lfi_evasion_level=lfi_evasion_level,
-        ssrf_evasion_level=ssrf_evasion_level,
-        ssrf_oob=req.ssrf.ssrf_include_oob,
-        sxss_evasion_level=sxss_evasion_level,
-        sxss_scan_mode=req.stored_xss.scan_mode,
-        sxss_max_risk_level=req.stored_xss.max_risk_level,
-        sxss_categories=list(req.stored_xss.categories),
-        sxss_target_params=list(req.stored_xss.target_params),
-        rxss_evasion_level=rxss_evasion_level,
-        # OOB / OAST (standalone callback detection)
-        oob_server=normalize_oast_server_url(req.oob.oob_server),
-        oob_retries=req.oob.oob_retries,
-        oob_poll_delay=req.oob.oob_poll_delay,
-        oob_poll_timeout=req.oob.oob_poll_timeout,
+@app.get("/api/scans")
+async def get_my_scans(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+) -> dict:
+    rows = (
+        db.query(Scan)
+        .filter(Scan.owner_id == current_user.id)
+        .order_by(Scan.created_at.desc())
+        .limit(MAX_SCAN_HISTORY_PER_USER)
+        .all()
     )
+    items = [scan_to_summary_dict(row) for row in rows]
+    return {
+        "items": items,
+        "count": len(items),
+        "max_stored": MAX_SCAN_HISTORY_PER_USER,
+    }
 
 
-def _serialize_findings(findings) -> list[dict[str, str]]:
-    serialized: list[dict[str, str]] = []
-    for finding in sorted(findings, key=_finding_sort_key):
-        payload_obj = finding.payload
-        severity = str(getattr(payload_obj, "risk_level", "HIGH"))
-        attack_type = str(
-            getattr(payload_obj, "attack_type", finding.module_name or "Unknown")
-        )
-        payload_value = str(getattr(payload_obj, "value", payload_obj))
-        param_location = getattr(finding.surface, "param_location", "unknown")
-        location_text = str(getattr(param_location, "name", param_location))
-
-        serialized.append(
-            {
-                "severity": severity,
-                "location": location_text,
-                "parameter": str(finding.parameter),
-                "url": str(getattr(finding.surface, "url", "") or ""),
-                "type": attack_type,
-                "payload": payload_value,
-            }
-        )
-    return serialized
 
 
-def _scan_log(scan: dict, message: str) -> None:
-    scan.setdefault("logs", []).append(f"[{time.strftime('%H:%M:%S')}] {message}")
-
-
-async def _run_real_scan(scan_id: str, req: ScanRequest) -> None:
-    started_at = time.monotonic()
-    scan = scans_db.get(scan_id)
-    if scan is None:
-        return
-
-    scan["status"] = "running"
-    scan["updated_at"] = time.time()
-    _scan_log(scan, f"스캔 시작: target={req.target_url}, type={req.scan_type}")
-
-    try:
-        args = _build_cli_args(req)
-        _apply_spa_runtime_options(args, on_warning=lambda msg: _scan_log(scan, f"[WARNING] {msg}"))
-        if args.type == "oob":
-            _scan_log(scan, f"OAST 서버: {args.oob_server}")
-        _scan_log(
-            scan,
-            f"CLI 인자 구성 완료 (crawl_mode={args.crawl_mode}, spa_max_routes={args.spa_max_routes})",
-        )
-        cookies = parse_cookies(args.cookie) if args.cookie else {}
-        _scan_log(scan, "공격면 수집 시작")
-        surfaces = await resolve_surfaces(args, base_url=args.url, cookies=cookies)
-        if not surfaces:
-            raise RuntimeError("No attack surfaces resolved from target.")
-        _scan_log(scan, f"공격면 수집 완료: {len(surfaces)}개")
-
-        context = prepare_scan_context(args, surfaces)
-        if context is None:
-            raise RuntimeError("Scan context preparation failed.")
-        _scan_log(
-            scan,
-            "스캔 컨텍스트 구성 완료 "
-            f"(modules={len(context['modules'])}, total_requests={context['total_requests']})",
-        )
-
-        engine = FuzzerEngine(
-            max_concurrent_requests=context["concurrency"],
-            worker_count=context["queue_workers"],
-            modules=context["modules"],
-            concurrency_per_module=context["queue_workers"],
-            session_pool_size=max(1, args.session_pool_size),
-            delay=context["delay"],
-        )
-
-        async def _request_sender(session, surface, parameter, payload):
-            return await build_and_send_request(session, surface, parameter, payload)
-
-        total_requests = max(1, context["total_requests"])
-        scan["total_requests"] = total_requests
-        last_logged_progress = -1.0
-        bf_true_random_milestone_logs = args.type == "bruteforce" and bool(
-            getattr(args, "bf_true_random", False)
-        )
-        next_completed_log_milestone = (
-            SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM if bf_true_random_milestone_logs else 0
-        )
-
-        async with scan_auth_lifecycle(args, base_cookies=cookies):
-            scan_task = asyncio.create_task(
-                engine.run_with_attack_modules(
-                    surfaces=surfaces,
-                    request_sender=_request_sender,
-                )
-            )
-
-            while not scan_task.done():
-                planned_total = total_requests
-                queued_total = engine.stats.queued
-                effective_total = max(planned_total, queued_total, 1)
-                completed = engine.stats.completed
-                progress_pct = min(
-                    100.0,
-                    round(completed / effective_total * 100, 1),
-                )
-                if not scan_task.done() and progress_pct >= 99.9:
-                    progress_pct = 99.9
-                scan["progress_percent"] = progress_pct
-                scan["progress"] = int(progress_pct)
-                scan["summary"] = {
-                    "queued": queued_total,
-                    "completed": completed,
-                    "failures": engine.stats.failures,
-                    "findings": engine.stats.findings,
-                    "elapsed_time": round(time.monotonic() - started_at, 2),
-                    "total_requests": effective_total,
-                    "planned_requests": planned_total,
-                }
-                scan["updated_at"] = time.time()
-                if progress_pct != last_logged_progress:
-                    _scan_log(
-                        scan,
-                        f"진행률 {progress_pct}% (completed={engine.stats.completed}, findings={engine.stats.findings}, failures={engine.stats.failures})",
-                    )
-                    last_logged_progress = progress_pct
-                if bf_true_random_milestone_logs:
-                    completed_now = engine.stats.completed
-                    while completed_now >= next_completed_log_milestone:
-                        _scan_log(
-                            scan,
-                            f"[true-random BF] 누적 요청 완료 {next_completed_log_milestone}건 "
-                            f"(queued={engine.stats.queued}, findings={engine.stats.findings}, failures={engine.stats.failures})",
-                        )
-                        next_completed_log_milestone += SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM
-                await asyncio.sleep(0.3)
-
-            stats = await scan_task
-        reporter = ReportGenerator(stats=stats, findings=engine.findings)
-        reporter.export_to_json(args.output)
-        _scan_log(scan, f"리포트 파일 저장 완료: {args.output}")
-
-        report_json = None
-        try:
-            with open(args.output, "r", encoding="utf-8") as fp:
-                report_json = json.load(fp)
-            _scan_log(scan, "리포트 JSON 로드 완료")
-        except (OSError, json.JSONDecodeError) as exc:
-            _scan_log(scan, f"리포트 JSON 로드 실패: {exc}")
-
-        findings = _serialize_findings(engine.findings)
-        final_total = max(total_requests, stats.queued, stats.completed, 1)
-        scan["status"] = "completed"
-        scan["progress"] = 100
-        scan["progress_percent"] = 100.0
-        scan["findings"] = findings
-        scan["summary"] = {
-            "queued": stats.queued,
-            "completed": stats.completed,
-            "failures": stats.failures,
-            "findings": stats.findings,
-            "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": final_total,
-            "planned_requests": total_requests,
-        }
-        scan["result"] = {
-            "summary": {
-                "target": args.url,
-                "scan_type": args.type,
-                "total_requests": stats.completed,
-                "findings": len(findings),
-                "output": args.output,
-            }
-        }
-        scan["report_json"] = report_json
-        scan["updated_at"] = time.time()
-        _scan_log(scan, "스캔 완료")
-    except Exception as exc:
-        scan["status"] = "failed"
-        scan["progress"] = int(scan.get("progress_percent") or scan.get("progress") or 0)
-        scan["error"] = str(exc)
-        prev = scan.get("summary") or {}
-        scan["summary"] = {
-            "queued": prev.get("queued", 0),
-            "completed": prev.get("completed", 0),
-            "failures": prev.get("failures", 0),
-            "findings": prev.get("findings", 0),
-            "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": scan.get("total_requests"),
-        }
-        scan["updated_at"] = time.time()
-        _scan_log(scan, f"스캔 실패: {exc}")
+@app.get("/health")
+async def health_check() -> dict:
+    return {"status": "ok"}
 
 
 @app.get("/")
