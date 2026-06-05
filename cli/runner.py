@@ -57,6 +57,7 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
 
     print_scan_configuration(
         base_url=base_url,
+        scan_id=getattr(args, "scan_id", "CLI-Local-Scan"),
         surface_count=len(surfaces),
         attack_type=args.type,
         module_count=len(context["modules"]),

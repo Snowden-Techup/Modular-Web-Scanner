@@ -388,6 +388,7 @@ async def start_scan(
 ) -> dict:
     scan_id = str(uuid4())
     request_payload = req.model_dump(by_alias=True)
+    request_payload["scan_id"] = scan_id
     scan = Scan(
         scan_id=scan_id,
         owner_id=current_user.id,

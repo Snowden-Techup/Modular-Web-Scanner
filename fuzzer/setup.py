@@ -15,8 +15,12 @@ from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
 
+import uuid
+
 def select_modules(args) -> list:
     selected = []
+
+    current_scan_id = getattr(args, "scan_id", str(uuid.uuid4()))
 
     if args.type in ("sqli", "all"):
         sqli_module = SQLiModule(

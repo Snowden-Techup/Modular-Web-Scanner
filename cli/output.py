@@ -37,6 +37,7 @@ async def progress_printer(
 def print_scan_configuration(
     *,
     base_url: str,
+    scan_id: str,
     surface_count: int,
     attack_type: str,
     module_count: int,
@@ -62,6 +63,7 @@ def print_scan_configuration(
     session_pool_size: int,
 ) -> None:
     print("=" * 60)
+    print(f"Scan ID:        {scan_id}")
     print(f"Target URL:     {base_url}")
     print(f"Target DBMS:    {target_dbms}")
     print(f"Target OS:      {target_os}")

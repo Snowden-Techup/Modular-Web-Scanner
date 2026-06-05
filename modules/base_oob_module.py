@@ -1,8 +1,8 @@
 import json
 import uuid
 import dataclasses
-from typing import Any, Tuple, List
-#import redis.asyncio as redis
+from typing import Any, Tuple, List, Optional
+import redis.asyncio as redis
 
 from modules.base_module import BaseModule
 from core.models import Payload
@@ -18,7 +18,10 @@ class BaseOOBModule(BaseModule):
         self.redis_url = kwargs.get("redis_url", "redis://localhost:6379/0")
         self.oob_ttl = kwargs.get("oob_ttl", 86400)  # 토큰 유효기간: 24시간
         
-        # Redis 커넥션 풀 (이벤트 루프 내부에서 초기화하기 위해 지연 할당)
+        # Scan ID 저장
+        self.scan_id = kwargs.get("scan_id", "unknown_scan")
+        
+        # Redis 커넥션 풀 (지연 할당)
         self._redis = None
 
     async def _get_redis(self) -> redis.Redis:
@@ -34,20 +37,28 @@ class BaseOOBModule(BaseModule):
         2. 타겟 정보를 Redis에 매핑
         3. 페이로드의 [OOB_HOST] 마커 치환
         """
+
         # 1. 8자리 고유 토큰 생성
         token = uuid.uuid4().hex[:8]
         
         # 실제 타겟에 주입될 도메인
         oob_host = f"{token}.{self.oob_domain}"
         
+        # Enum 타입일 수 있는 값들을 문자열로 변환
+        loc = getattr(surface, "param_location", "")
+        loc_str = loc.name if hasattr(loc, "name") else str(loc)
+        method_raw = getattr(surface, "method", "GET")
+        method_str = getattr(method_raw, "value", str(method_raw))
+        
         # 2. 메인 스캐너의 Webhook 리시버가 참조할 수 있도록 Redis에 매핑 데이터 저장
-        """r = await self._get_redis()
+        r = await self._get_redis()
         meta_data = {
+            "scan_id": self.scan_id,
             "module_name": self.name,
             "target": {
                 "url": getattr(surface, "url", ""),
-                "method": getattr(surface, "method", "GET"),
-                "location": getattr(surface, "param_location", ""),
+                "method": method_str,
+                "location": loc_str,
                 "parameter": parameter
             },
             "attack_info": {
@@ -58,10 +69,7 @@ class BaseOOBModule(BaseModule):
         }
         
         # 토큰을 키로 하여 TTL(24시간)과 함께 저장 (Fire & Forget)
-        await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))"""
-
-        target_url = getattr(surface, "url", "Unknown_URL")
-        #print(f"    [OOB-BIND] Token: {token} | Param: {parameter} | Target: {target_url}")
+        await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))
         
         # 3. Payload 객체의 value 치환 후 복제본 반환
         new_value = payload.value.replace("[OOB_HOST]", oob_host)
