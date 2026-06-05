@@ -52,7 +52,7 @@ class URLFilter:
 
     # ✨ [핵심 수정] SSRF 방어용 차단 네트워크 정의 (파서에서 이동)
     BLOCKED_NETWORKS_V4 = (
-
+        ipaddress.ip_network("127.0.0.0/8"),
         ipaddress.ip_network("10.0.0.0/8"),
         ipaddress.ip_network("172.16.0.0/12"),
         ipaddress.ip_network("192.168.0.0/16"),
