@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="ko">
 <head>
@@ -905,6 +906,7 @@
                 <option value="ssrf">ssrf</option>
                 <option value="stored_xss">stored_xss</option>
                 <option value="reflected_xss">reflected_xss</option>
+                <option value="ssti">ssti</option>
                 <option value="oob">oob test</option>
               </select>
             </div>
@@ -912,7 +914,7 @@
               <label class="form-label" for="level">우회 단계</label>
               <input id="level" type="number" class="form-control" min="0" max="3" value="1">
               <div class="field-help">
-                SQLi·LFI·SSRF·Stored XSS 우회 단계. OSCi·Reflected XSS는 모듈별 상세에서 설정합니다. bruteforce에는 적용되지 않습니다.
+                SQLi·LFI·SSRF·Stored XSS·SSTI 우회 단계. OSCi·Reflected XSS는 모듈별 상세에서 설정합니다. bruteforce에는 적용되지 않습니다.
               </div>
             </div>
           </div>
@@ -1272,6 +1274,20 @@
             </div>
             </div>
 
+            <div id="detailPanelSsti" class="module-detail-panel" hidden>
+            <div class="row g-2 mb-3">
+              <div class="col-12 hint">SSTI (Server-Side Template Injection)</div>
+              <div class="col-md-4">
+                <label class="form-label" for="ssti_max_payloads">페이로드 상한</label>
+                <input id="ssti_max_payloads" type="number" class="form-control" min="0" value="0">
+                <div class="field-help">0이면 전체 사용. 빠른 테스트 시 상한을 지정합니다.</div>
+              </div>
+              <div class="col-md-8 d-flex align-items-end">
+                <div class="field-help mb-2">우회 단계는 상단 「우회 단계」 값을 사용합니다.</div>
+              </div>
+            </div>
+            </div>
+
             <div id="detailPanelOob" class="module-detail-panel" hidden>
             <div class="row g-2 mb-3">
               <div class="col-12 hint">OOB test (고정 페이로드 1종)</div>
@@ -1431,6 +1447,7 @@
     const detailPanelSsrf = document.getElementById("detailPanelSsrf");
     const detailPanelSxss = document.getElementById("detailPanelSxss");
     const detailPanelRxss = document.getElementById("detailPanelRxss");
+    const detailPanelSsti = document.getElementById("detailPanelSsti");
     const detailPanelOob = document.getElementById("detailPanelOob");
     const moduleDetailHint = document.getElementById("moduleDetailHint");
     let lastScanId = "";
@@ -1648,8 +1665,9 @@
       const showSsrf = t === "all" || t === "ssrf";
       const showSxss = t === "all" || t === "stored_xss";
       const showRxss = t === "all" || t === "reflected_xss";
+      const showSsti = t === "all" || t === "ssti";
       const showOob = t === "oob";
-      const any = showSqli || showOsci || showBf || showSsrf || showSxss || showRxss || showOob;
+      const any = showSqli || showOsci || showBf || showSsrf || showSxss || showRxss || showSsti || showOob;
 
       detailPanelSqli.hidden = !showSqli;
       detailPanelOsci.hidden = !showOsci;
@@ -1657,6 +1675,7 @@
       detailPanelSsrf.hidden = !showSsrf;
       detailPanelSxss.hidden = !showSxss;
       detailPanelRxss.hidden = !showRxss;
+      detailPanelSsti.hidden = !showSsti;
       detailPanelOob.hidden = !showOob;
       moduleDetailSection.hidden = !any;
 
@@ -1667,6 +1686,7 @@
       if (showSsrf) labels.push("SSRF");
       if (showSxss) labels.push("Stored XSS");
       if (showRxss) labels.push("Reflected XSS");
+      if (showSsti) labels.push("SSTI");
       if (showOob) labels.push("OOB test");
       moduleDetailHint.textContent = labels.length ? labels.join(" · ") : "";
     }
@@ -2039,6 +2059,9 @@
         },
         reflected_xss: {
           evasion_level: toInt("rxss_evasion_level", 1)
+        },
+        ssti: {
+          max_payloads: toInt("ssti_max_payloads", 0)
         },
         oob: {
           oob_server: normalizeOobServerInput(

