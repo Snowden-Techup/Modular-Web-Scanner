@@ -8,6 +8,7 @@ from modules.sqli.module import SQLiModule
 from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
+from modules.ssti.module import SSTIModule
 
 
 def get_attack_modules(attack_type: str) -> list[BaseModule]:
@@ -23,6 +24,7 @@ def get_attack_modules(attack_type: str) -> list[BaseModule]:
         "file_upload": FileUploadModule,
         "stored_xss": StoredXSSModule,
         "reflected_xss": ReflectedXSSModule,
+        "ssti": SSTIModule,
 
     }
     if attack_type == "all":
