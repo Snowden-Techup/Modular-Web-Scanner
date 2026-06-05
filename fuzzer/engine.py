@@ -488,6 +488,11 @@ class FuzzerEngine:
             if stop_event is not None and stop_event.is_set():
                 return
 
+            bind_hook = getattr(module, "bind_payload", None)
+            if callable(bind_hook):
+                hook_result = bind_hook(surface, parameter, payload)
+                payload = await hook_result if isawaitable(hook_result) else hook_result
+
             response: Any
             
             payload_value = str(getattr(payload, "value", payload))
