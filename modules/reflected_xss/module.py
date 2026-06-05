@@ -9,7 +9,8 @@ import logging
 from typing import List, Any
 import asyncio
 import atexit
-from concurrent.futures import ProcessPoolExecutor
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 from modules.base_module import BaseModule
 from modules.reflected_xss.payloads import get_xss_payloads
@@ -21,10 +22,17 @@ logger = logging.getLogger(__name__)
 _executor = None
 
 
+def _use_thread_pool() -> bool:
+    """Celery prefork + ProcessPoolExecutor 조합은 asyncio 워커에서 교착을 유발할 수 있음."""
+    flag = os.getenv("CELERY_WORKER", "").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 def _get_executor():
     global _executor
     if _executor is None:
-        _executor = ProcessPoolExecutor(max_workers=4)
+        pool_cls = ThreadPoolExecutor if _use_thread_pool() else ProcessPoolExecutor
+        _executor = pool_cls(max_workers=4)
         atexit.register(_executor.shutdown, wait=False)
     return _executor
 

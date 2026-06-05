@@ -114,14 +114,94 @@
       display: flex;
       flex-direction: column;
     }
+    .app-shell {
+      width: 100%;
+      height: 100%;
+      display: flex;
+    }
     .topbar {
       min-height: 62px;
       border-bottom: 1px solid var(--border);
       background: rgba(9, 13, 24, 0.88);
       display: flex;
       align-items: center;
-      justify-content: flex-start;
+      justify-content: space-between;
       padding: 0 16px;
+      gap: 12px;
+    }
+    .topbar-auth {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-auth {
+      border: 1px solid #3d4f74;
+      color: #dbeafe;
+      background: rgba(18, 26, 45, 0.55);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+    .btn-auth:hover { background: rgba(33, 52, 90, 0.65); }
+    .auth-status {
+      font-size: 0.75rem;
+      color: #93c5fd;
+      white-space: nowrap;
+    }
+    .login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(5, 8, 15, 0.72);
+      backdrop-filter: blur(4px);
+    }
+    .login-screen.hidden {
+      display: none;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 420px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(18, 26, 45, 0.96), rgba(13, 20, 36, 0.98));
+      padding: 20px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+    }
+    .login-title {
+      font-size: 1.1rem;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    .login-subtitle {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 16px;
+    }
+    .login-error {
+      margin-top: 10px;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.78rem;
+      color: #fecaca;
+      background: rgba(127, 29, 29, 0.35);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      word-break: break-word;
+    }
+    .login-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .login-actions .btn-auth {
+      flex: 1;
+      padding: 9px 10px;
+      font-size: 0.8rem;
     }
     .view {
       display: none;
@@ -287,6 +367,29 @@
       font-weight: 700;
       color: #e0f2fe;
       font-variant-numeric: tabular-nums;
+    }
+    .scan-phase-badge {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: #67e8f9;
+      background: rgba(34, 211, 238, 0.12);
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      border-radius: 999px;
+      padding: 3px 10px;
+      animation: phase-pulse 1.6s ease-in-out infinite;
+    }
+    .scan-phase-badge[hidden] {
+      display: none !important;
+      animation: none;
+    }
+    @keyframes phase-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.65; }
+    }
+    .progress-stats.is-pre-fuzzing .progress-stat strong {
+      color: #64748b;
     }
     .progress-track {
       height: 8px;
@@ -585,11 +688,88 @@
       word-break: break-all;
       line-height: 1.45;
     }
-    .report-summary-row {
-      font-size: 0.74rem;
-      color: #64748b;
-      margin-bottom: 10px;
+    .report-findings-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .finding-count-badge {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      border-radius: 999px;
+      padding: 2px 10px;
+      line-height: 1.35;
       font-family: "JetBrains Mono", monospace;
+    }
+    .finding-count-badge[hidden] {
+      display: none;
+    }
+
+    .scan-history-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(10, 16, 30, 0.8);
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+    .scan-history-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .scan-history-head .hint { margin: 0; }
+    .scan-history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .history-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid #2a3a5c;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.55);
+      padding: 10px 12px;
+      color: #dbeafe;
+      cursor: pointer;
+    }
+    .history-item:hover {
+      border-color: #3d5a8a;
+      background: rgba(25, 40, 70, 0.65);
+    }
+    .history-item--active {
+      border-color: #2c7184;
+      background: rgba(34, 211, 238, 0.1);
+    }
+    .history-item-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+      font-size: 0.72rem;
+    }
+    .history-status {
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #93c5fd;
+    }
+    .history-time { color: #64748b; }
+    .history-target {
+      font-size: 0.8rem;
+      word-break: break-all;
+      line-height: 1.35;
+      margin-bottom: 3px;
+    }
+    .history-meta {
+      font-size: 0.72rem;
+      color: #94a3b8;
     }
 
     @media (min-width: 1240px) {
@@ -653,6 +833,28 @@
   </style>
 </head>
 <body>
+  <section class="login-screen hidden" id="loginScreen">
+    <div class="login-card">
+      <div class="login-title">로그인</div>
+      <div class="login-subtitle">스캔 실행·결과 조회 시 로그인이 필요합니다.</div>
+      <div class="mb-3">
+        <label class="form-label" for="loginUsername">아이디</label>
+        <input id="loginUsername" type="text" class="form-control" placeholder="아이디 입력">
+      </div>
+      <div>
+        <label class="form-label" for="loginPassword">비밀번호</label>
+        <input id="loginPassword" type="password" class="form-control" placeholder="비밀번호 입력">
+      </div>
+      <div class="login-actions">
+        <button id="registerBtn" type="button" class="btn-auth">회원가입</button>
+        <button id="loginBtn" type="button" class="btn-auth">로그인</button>
+        <button id="closeLoginBtn" type="button" class="btn-auth">닫기</button>
+      </div>
+      <div id="loginError" class="login-error" hidden></div>
+    </div>
+  </section>
+
+  <div class="app-shell" id="appShell">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
       <div class="sidebar-title">Modular <span class="accent">Web Scanner</span></div>
@@ -671,6 +873,11 @@
   <div class="main-wrap">
     <header class="topbar">
       <div>MWS Runtime</div>
+      <div class="topbar-auth">
+        <button id="openLoginBtn" type="button" class="btn-auth">로그인</button>
+        <button id="logoutBtn" type="button" class="btn-auth" hidden>로그아웃</button>
+        <span id="authStatus" class="auth-status">게스트</span>
+      </div>
     </header>
 
     <section class="view active scan-view" id="scanView">
@@ -816,8 +1023,8 @@
               <div class="col-md-4">
                 <label class="form-label" for="crawl_mode">크롤 모드</label>
                 <select id="crawl_mode" class="form-select">
-                  <option value="hybrid" selected>hybrid (정적+SPA)</option>
-                  <option value="static">static</option>
+                  <option value="hybrid">hybrid (정적+SPA)</option>
+                  <option value="static" selected>static</option>
                   <option value="dynamic">dynamic (SPA)</option>
                 </select>
               </div>
@@ -865,11 +1072,25 @@
             <div id="detailPanelSqli" class="module-detail-panel">
             <div class="row g-2 mb-3">
               <div class="col-12 hint">SQLi</div>
-              <div class="col-md-6">
+              <div class="col-md-4">
+                <label class="form-label" for="sqli_target_dbms">대상 DBMS</label>
+                <select id="sqli_target_dbms" class="form-select">
+                  <option value="all" selected>all</option>
+                  <option value="mysql">mysql</option>
+                  <option value="mssql">mssql</option>
+                  <option value="oracle">oracle</option>
+                  <option value="postgres">postgres</option>
+                  <option value="sqlite">sqlite</option>
+                  <option value="access">access</option>
+                </select>
+                <div class="field-help">--target-dbms (기본: all)</div>
+              </div>
+              <div class="col-md-4">
                 <label class="form-label" for="max_time_payloads">시간기반 상한</label>
                 <input id="max_time_payloads" type="number" class="form-control" min="0" value="0">
+                <div class="field-help">0이면 전체 사용 (시간기반 포함 시)</div>
               </div>
-              <div class="col-md-6 d-flex align-items-end">
+              <div class="col-md-4 d-flex align-items-end">
                 <div class="form-check mb-2">
                   <input id="include_time_based" type="checkbox" class="form-check-input">
                   <label for="include_time_based" class="form-check-label">시간기반 포함</label>
@@ -1090,12 +1311,13 @@
       <div class="scan-progress-compact">
         <div class="scan-progress-compact-top">
           <span id="scanMeta">scan_id: (없음)</span>
+          <span id="scanPhaseLabel" class="scan-phase-badge" hidden>크롤링 중</span>
           <span class="progress-percent-inline" id="scanProgressPercent">0.0%</span>
         </div>
         <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="scanProgressTrack">
           <div class="progress-fill" id="scanProgressFill"></div>
         </div>
-        <div class="progress-stats">
+        <div class="progress-stats" id="progressStats">
           <div class="progress-stat">
             <span class="muted">전체</span>
             <strong id="statTotal">—</strong>
@@ -1117,6 +1339,16 @@
     <section class="view report-view" id="reportView">
       <div class="report-title">취약점 스캔 결과 리포트</div>
 
+      <div class="scan-history-box">
+        <div class="scan-history-head">
+          <span class="hint">최근 스캔 기록 (최대 10건)</span>
+          <button id="refreshHistoryBtn" type="button" class="btn-auth">새로고침</button>
+        </div>
+        <div id="scanHistoryList" class="scan-history-list">
+          <div class="muted">로그인 후 저장된 스캔 기록을 불러옵니다.</div>
+        </div>
+      </div>
+
       <div class="stat-grid">
         <div class="stat-card">
           <div class="stat-label">상태</div>
@@ -1131,14 +1363,17 @@
           <div class="stat-value" id="reportTarget" style="font-size: 0.95rem;">-</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label" id="reportFindingsLabel">공격 유형 수</div>
-          <div class="stat-value" id="reportFindings">0</div>
+          <div class="stat-label" id="reportFindingsLabel">공격 유형</div>
+          <div class="stat-value" id="reportFindings">-</div>
         </div>
       </div>
 
       <div class="report-box">
         <div class="section-header" style="padding:0 0 8px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">
-          <span>발견 내역</span>
+          <span class="report-findings-title">
+            발견 내역
+            <span id="findingCountBadge" class="finding-count-badge" hidden></span>
+          </span>
           <span class="hint" id="reportScanId">scan_id: (없음)</span>
         </div>
         <div id="findingList" class="report-list">
@@ -1147,12 +1382,15 @@
       </div>
     </section>
   </div>
+  </div>
 
   <script>
     const scanMeta = document.getElementById("scanMeta");
     const scanProgressPercent = document.getElementById("scanProgressPercent");
     const scanProgressFill = document.getElementById("scanProgressFill");
     const scanProgressTrack = document.getElementById("scanProgressTrack");
+    const scanPhaseLabel = document.getElementById("scanPhaseLabel");
+    const progressStats = document.getElementById("progressStats");
     const statTotal = document.getElementById("statTotal");
     const statSuccess = document.getElementById("statSuccess");
     const statFail = document.getElementById("statFail");
@@ -1170,7 +1408,21 @@
     const reportTarget = document.getElementById("reportTarget");
     const reportFindings = document.getElementById("reportFindings");
     const reportScanId = document.getElementById("reportScanId");
+    const findingCountBadge = document.getElementById("findingCountBadge");
     const findingList = document.getElementById("findingList");
+    const scanHistoryList = document.getElementById("scanHistoryList");
+    const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
+    let scanHistoryItems = [];
+    const loginScreen = document.getElementById("loginScreen");
+    const loginUsername = document.getElementById("loginUsername");
+    const loginPassword = document.getElementById("loginPassword");
+    const loginError = document.getElementById("loginError");
+    const registerBtn = document.getElementById("registerBtn");
+    const loginBtn = document.getElementById("loginBtn");
+    const openLoginBtn = document.getElementById("openLoginBtn");
+    const closeLoginBtn = document.getElementById("closeLoginBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const authStatus = document.getElementById("authStatus");
     const scanTypeSelect = document.getElementById("scan_type");
     const moduleDetailSection = document.getElementById("moduleDetailSection");
     const detailPanelSqli = document.getElementById("detailPanelSqli");
@@ -1182,7 +1434,10 @@
     const detailPanelOob = document.getElementById("detailPanelOob");
     const moduleDetailHint = document.getElementById("moduleDetailHint");
     let lastScanId = "";
+    let displayedProgressPercent = 0;
     let pollTimer = null;
+    let accessToken = localStorage.getItem("mws_access_token") || "";
+    let currentUsername = localStorage.getItem("mws_username") || "";
 
     function showScanError(msg) {
       scanErrorBanner.textContent = msg;
@@ -1192,6 +1447,64 @@
     function clearScanError() {
       scanErrorBanner.hidden = true;
       scanErrorBanner.textContent = "";
+    }
+
+    function showLoginError(msg) {
+      loginError.textContent = msg;
+      loginError.hidden = !msg;
+    }
+
+    function openLoginModal() {
+      loginScreen.classList.remove("hidden");
+      showLoginError("");
+      loginUsername.focus();
+    }
+
+    function closeLoginModal() {
+      loginScreen.classList.add("hidden");
+      showLoginError("");
+    }
+
+    function renderAuthState() {
+      if (accessToken) {
+        authStatus.textContent = `로그인: ${currentUsername || "(unknown)"}`;
+        openLoginBtn.hidden = true;
+        logoutBtn.hidden = false;
+        closeLoginModal();
+      } else {
+        authStatus.textContent = "게스트 (스캔 시 로그인 필요)";
+        openLoginBtn.hidden = false;
+        logoutBtn.hidden = true;
+      }
+    }
+
+    function setAuth(token, username) {
+      accessToken = token || "";
+      currentUsername = username || "";
+      if (accessToken) {
+        localStorage.setItem("mws_access_token", accessToken);
+      } else {
+        localStorage.removeItem("mws_access_token");
+      }
+      if (currentUsername) {
+        localStorage.setItem("mws_username", currentUsername);
+      } else {
+        localStorage.removeItem("mws_username");
+      }
+      renderAuthState();
+      if (accessToken) {
+        loadScanHistory();
+      } else {
+        scanHistoryItems = [];
+        scanHistoryList.innerHTML =
+          '<div class="muted">로그인 후 저장된 스캔 기록을 불러옵니다.</div>';
+      }
+    }
+
+    function authHeaders(extraHeaders = {}) {
+      const headers = { ...extraHeaders };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+      return headers;
     }
 
     function formatProgressPercent(scan) {
@@ -1223,7 +1536,53 @@
       return { effectiveTotal, completed, failures, success };
     }
 
+    function resolveScanPhase(scan) {
+      const phase = scan.summary?.phase;
+      if (phase === "crawling") return "crawling";
+      if (phase === "queued" || scan.status === "queued") return "queued";
+      if (
+        scan.status === "running"
+        && scan.summary?.phase !== "fuzzing"
+        && !scan.total_requests
+        && Number(scan.summary?.completed ?? 0) === 0
+        && !(typeof scan.progress_percent === "number" && scan.progress_percent > 0)
+      ) {
+        return "crawling";
+      }
+      return phase || scan.status || "";
+    }
+
+    function formatStatusLabel(scan) {
+      const phase = resolveScanPhase(scan);
+      if (phase === "crawling") return "크롤링 중";
+      if (phase === "queued") return "대기 중";
+      if (phase === "fuzzing" || scan.status === "running") return "퍼징 중";
+      if (scan.status === "completed") return "완료";
+      if (scan.status === "failed") return "실패";
+      return scan.status || "-";
+    }
+
     function updateScanProgressUI(scan) {
+      const phase = resolveScanPhase(scan);
+      const isPreFuzzing = phase === "crawling" || phase === "queued";
+
+      if (isPreFuzzing) {
+        displayedProgressPercent = 0;
+        scanPhaseLabel.hidden = false;
+        scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
+        scanProgressPercent.textContent = "—";
+        scanProgressFill.style.width = "0%";
+        scanProgressTrack.setAttribute("aria-valuenow", "0");
+        statTotal.textContent = "—";
+        statSuccess.textContent = "—";
+        statFail.textContent = "—";
+        progressStats.classList.add("is-pre-fuzzing");
+        return;
+      }
+
+      scanPhaseLabel.hidden = true;
+      progressStats.classList.remove("is-pre-fuzzing");
+
       const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);
 
       statTotal.textContent = String(effectiveTotal);
@@ -1238,7 +1597,13 @@
       } else {
         pct = Number(scan.progress ?? 0);
       }
-      if (scan.status === "completed") pct = 100;
+      if (scan.status === "completed") {
+        pct = 100;
+        displayedProgressPercent = 100;
+      } else {
+        pct = Math.max(displayedProgressPercent, pct);
+        displayedProgressPercent = pct;
+      }
       pct = Math.min(100, Math.max(0, pct));
 
       scanProgressPercent.textContent = `${pct.toFixed(1)}%`;
@@ -1259,8 +1624,13 @@
         views.forEach((view) => {
           view.classList.toggle("active", view.id === target);
         });
+        if (target === "reportView") {
+          loadScanHistory();
+        }
       });
     });
+
+    refreshHistoryBtn.addEventListener("click", () => loadScanHistory());
 
     advancedToggle.addEventListener("click", () => {
       const isOpen = advancedWrap.classList.toggle("open");
@@ -1446,44 +1816,60 @@
         </div>`;
     }
 
+    function resolveScanType(scan) {
+      const req = scan.request || {};
+      return req.scan_type || req.type || "-";
+    }
+
+    function setFindingCount(count) {
+      if (!findingCountBadge) return;
+      if (count == null || Number.isNaN(Number(count)) || Number(count) < 0) {
+        findingCountBadge.hidden = true;
+        findingCountBadge.textContent = "";
+        return;
+      }
+      findingCountBadge.hidden = false;
+      findingCountBadge.textContent = `${Number(count)}건`;
+    }
+
     function renderReport(scan) {
       reportScanId.textContent  = `scan_id: ${scan.scan_id || "(없음)"}`;
-      reportStatus.textContent  = scan.status || "-";
-      reportProgress.textContent = formatProgressPercent(scan);
+      reportStatus.textContent  = formatStatusLabel(scan);
+      reportProgress.textContent = resolveScanPhase(scan) === "crawling" || resolveScanPhase(scan) === "queued"
+        ? "—"
+        : formatProgressPercent(scan);
       reportTarget.textContent  = scan.target || scan.request?.url || "-";
+      reportFindings.textContent = resolveScanType(scan);
 
       const reportVulns  = scan.report_json?.vulnerabilities || [];
       const rawFindings  = scan.findings || [];
       const useGrouped   = reportVulns.length > 0 && isGroupedFormat(reportVulns);
-      const flatFallback = !useGrouped && (rawFindings.length > 0 || reportVulns.length > 0);
+      const scanDone = scan.status === "completed" || scan.status === "failed";
 
-      /* ── 요약 카운트 ── */
-      const findingsLabel = document.getElementById("reportFindingsLabel");
-      if (useGrouped) {
-        const sum = scan.report_json?.metadata?.summary || {};
-        reportFindings.textContent = String(sum.vulnerability_types ?? reportVulns.length);
-        if (findingsLabel) findingsLabel.textContent = "공격 유형 수";
-      } else {
-        const n = rawFindings.length || reportVulns.length;
-        reportFindings.textContent = String(n);
-        if (findingsLabel) findingsLabel.textContent = "취약점 수";
+      if (!scanDone) {
+        setFindingCount(null);
       }
 
       if (useGrouped) {
         const sum = scan.report_json?.metadata?.summary || {};
-        const deduped = sum.findings_deduped != null ? `중복제거 ${sum.findings_deduped}건` : "";
-        const raw     = sum.findings_raw     != null ? `원본 ${sum.findings_raw}건` : "";
-        const summaryLine = [deduped, raw].filter(Boolean).join(" · ");
-        findingList.innerHTML =
-          (summaryLine ? `<div class="report-summary-row">${escapeHtml(summaryLine)}</div>` : "") +
-          reportVulns.map(renderGroupCard).join("");
+        const dedupedCount = sum.findings_deduped ?? reportVulns.length;
+        if (scanDone) {
+          setFindingCount(dedupedCount);
+        }
+        findingList.innerHTML = reportVulns.map(renderGroupCard).join("");
         return;
       }
 
       const items = rawFindings.length > 0 ? rawFindings : reportVulns;
       if (!items.length) {
+        if (scanDone) {
+          setFindingCount(0);
+        }
         findingList.innerHTML = '<div class="muted">발견된 취약점이 없습니다.</div>';
         return;
+      }
+      if (scanDone) {
+        setFindingCount(items.length);
       }
       const sorted = [...items].sort((a, b) => {
         const ra = SEVERITY_SORT_ORDER[severityTier(a.attack_info?.severity ?? a.severity)] ?? 4;
@@ -1492,6 +1878,73 @@
         return (a.target?.url || a.url || "").localeCompare(b.target?.url || b.url || "");
       });
       findingList.innerHTML = sorted.map((item) => renderFlatCard(item, scan)).join("");
+    }
+
+    function formatScanTime(ts) {
+      if (!ts) return "-";
+      return new Date(ts * 1000).toLocaleString("ko-KR");
+    }
+
+    function renderScanHistoryList() {
+      if (!scanHistoryItems.length) {
+        scanHistoryList.innerHTML =
+          '<div class="muted">저장된 스캔 기록이 없습니다. 스캔을 실행해 보세요.</div>';
+        return;
+      }
+      scanHistoryList.innerHTML = scanHistoryItems
+        .map((item) => {
+          const active = item.scan_id === lastScanId ? " history-item--active" : "";
+          const status = escapeHtml(item.status || "-");
+          const target = escapeHtml(item.target || "-");
+          const type = escapeHtml(item.scan_type || "-");
+          const findings = Number(item.findings_count ?? 0);
+          const pct =
+            typeof item.progress_percent === "number"
+              ? `${item.progress_percent.toFixed(1)}%`
+              : "-";
+          return `<button type="button" class="history-item${active}" data-scan-id="${escapeHtml(item.scan_id)}">
+            <div class="history-item-top">
+              <span class="history-status">${status}</span>
+              <span class="history-time">${escapeHtml(formatScanTime(item.created_at))}</span>
+            </div>
+            <div class="history-target">${target}</div>
+            <div class="history-meta">${type} · ${pct} · findings ${findings}</div>
+          </button>`;
+        })
+        .join("");
+      scanHistoryList.querySelectorAll(".history-item").forEach((btn) => {
+        btn.addEventListener("click", () => selectHistoryScan(btn.dataset.scanId));
+      });
+    }
+
+    async function loadScanHistory() {
+      if (!accessToken) {
+        scanHistoryItems = [];
+        scanHistoryList.innerHTML =
+          '<div class="muted">로그인 후 최근 스캔 기록을 볼 수 있습니다.</div>';
+        return;
+      }
+      try {
+        const data = await requestJson("/api/scans");
+        scanHistoryItems = data.items || [];
+        renderScanHistoryList();
+      } catch (err) {
+        scanHistoryList.innerHTML = `<div class="muted">기록 불러오기 실패: ${escapeHtml(String(err))}</div>`;
+      }
+    }
+
+    async function selectHistoryScan(scanId) {
+      if (!scanId || !accessToken) return;
+      lastScanId = scanId;
+      scanMeta.textContent = `scan_id: ${scanId}`;
+      renderScanHistoryList();
+      try {
+        const data = await requestJson(`/api/scan/${scanId}`);
+        renderReport(data);
+      } catch (err) {
+        findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;
+        setFindingCount(null);
+      }
     }
 
     async function syncScanState() {
@@ -1507,6 +1960,7 @@
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        await loadScanHistory();
       }
       return data;
     }
@@ -1544,6 +1998,7 @@
           graphql_unsafe: document.getElementById("graphql_unsafe").checked
         },
         sqli: {
+          target_dbms: document.getElementById("sqli_target_dbms").value,
           include_time_based: document.getElementById("include_time_based").checked,
           max_time_payloads: toInt("max_time_payloads", 0)
         },
@@ -1610,10 +2065,20 @@
       return v;
     }
 
-    async function requestJson(url, options) {
-      const res = await fetch(url, options);
-      const data = await res.json();
-      if (!res.ok) throw new Error(JSON.stringify(data, null, 2));
+    async function requestJson(url, options = {}) {
+      const opts = { ...options };
+      opts.headers = authHeaders(options.headers || {});
+      const res = await fetch(url, opts);
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        data = { detail: `HTTP ${res.status}` };
+      }
+      if (!res.ok) {
+        const msg = data?.detail || JSON.stringify(data);
+        throw new Error(msg);
+      }
       return data;
     }
 
@@ -1631,9 +2096,68 @@
     }
 
     applySchemaDefaults();
+    renderAuthState();
+
+    openLoginBtn.addEventListener("click", () => openLoginModal());
+    closeLoginBtn.addEventListener("click", () => closeLoginModal());
+    loginScreen.addEventListener("click", (e) => {
+      if (e.target === loginScreen) closeLoginModal();
+    });
+
+    registerBtn.addEventListener("click", async () => {
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value;
+      if (!username || !password) {
+        showLoginError("회원가입용 아이디·비밀번호를 입력하세요.");
+        return;
+      }
+      showLoginError("");
+      try {
+        await requestJson("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        showLoginError(`가입 완료: ${username} (이제 로그인하세요)`);
+      } catch (err) {
+        showLoginError(`회원가입 실패: ${err}`);
+      }
+    });
+
+    loginBtn.addEventListener("click", async () => {
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value;
+      if (!username || !password) {
+        showLoginError("아이디와 비밀번호를 입력하세요.");
+        return;
+      }
+      showLoginError("");
+      try {
+        const data = await requestJson("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        setAuth(data.access_token, data.user?.username || username);
+        await loadScanHistory();
+      } catch (err) {
+        showLoginError(`로그인 실패: ${err}`);
+      }
+    });
+
+    logoutBtn.addEventListener("click", () => {
+      setAuth("", "");
+      lastScanId = "";
+      scanMeta.textContent = "scan_id: (없음)";
+    });
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (!accessToken) {
+        showScanError("스캔을 시작하려면 먼저 로그인하세요.");
+        openLoginModal();
+        return;
+      }
       const payload = buildPayload();
       clearScanError();
       try {
@@ -1646,15 +2170,17 @@
         scanMeta.textContent = `scan_id: ${lastScanId}`;
         reportScanId.textContent = `scan_id: ${lastScanId}`;
         reportTarget.textContent = data.request?.url || "-";
-        reportStatus.textContent = "queued";
+        reportStatus.textContent = "대기 중";
         reportProgress.textContent = "0.0%";
-        reportFindings.textContent = "0";
+        reportFindings.textContent = payload.scan_type || "all";
+        setFindingCount(null);
         findingList.innerHTML = '<div class="muted">스캔 진행 중입니다. 상태 조회 후 리포트가 갱신됩니다.</div>';
+        displayedProgressPercent = 0;
         updateScanProgressUI({
           status: "queued",
           progress_percent: 0,
           progress: 0,
-          summary: {},
+          summary: { phase: "queued" },
           total_requests: null
         });
         if (pollTimer) clearInterval(pollTimer);
@@ -1662,6 +2188,7 @@
           syncScanState().catch((err) => showScanError(`동기화 실패: ${err}`));
         }, 1000);
         await syncScanState();
+        await loadScanHistory();
       } catch (err) {
         showScanError(`요청 실패: ${err}`);
       }

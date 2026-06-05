@@ -1,0 +1,95 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: scanner_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  db:
+    image: postgres:15-alpine
+    container_name: scanner_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: scanner_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d scanner_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  web:
+    build: .
+    container_name: scanner_web
+    command: uvicorn webapp.main:app --host 0.0.0.0 --port 8000
+    environment:
+      PYTHONPATH: /app
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+
+  celery_worker:
+    build: .
+    container_name: scanner_worker
+    command: celery -A webapp.celery_app worker --pool=solo --loglevel=info
+    environment:
+      PYTHONPATH: /app
+      CELERY_WORKER: "1"
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: always
+    cpus: "1.0"
+    mem_limit: 3g
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 3G
+
+  nginx:
+    image: nginx:alpine
+    container_name: scanner_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: always
+
+volumes:
+  postgres_data:
