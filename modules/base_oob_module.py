@@ -1,7 +1,8 @@
+import os
 import json
 import uuid
 import dataclasses
-from typing import Any, Tuple, List, Optional
+from typing import Any, Tuple, List
 import redis.asyncio as redis
 
 from modules.base_module import BaseModule
@@ -11,15 +12,17 @@ class BaseOOBModule(BaseModule):
     def __init__(self, name: str, **kwargs):
         super().__init__(name)
         
-        # OOB 콜백 서버 도메인 설정 (기본값)
-        self.oob_domain = kwargs.get("oob_domain", "oob.snowden.kr")
+        default_oob_domain = os.getenv("OOB_DOMAIN", "oob.snowden.kr")
+        self.oob_domain = kwargs.get("oob_domain", default_oob_domain)
         
-        # Redis 연결 설정
-        self.redis_url = kwargs.get("redis_url", "redis://localhost:6379/0")
+        # 도커 환경변수(REDIS_URL) 반영
+        default_redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.redis_url = kwargs.get("redis_url", default_redis_url)
+        
         self.oob_ttl = kwargs.get("oob_ttl", 86400)  # 토큰 유효기간: 24시간
         
         # Scan ID 저장
-        self.scan_id = kwargs.get("scan_id", "unknown_scan")
+        self.scan_id = kwargs.get("scan_id", "UNKNOWN_SCAN_ID")
         
         # Redis 커넥션 풀 (지연 할당)
         self._redis = None
@@ -33,18 +36,14 @@ class BaseOOBModule(BaseModule):
     async def bind_payload(self, surface: Any, parameter: str, payload: Payload) -> Payload:
         """
         엔진 훅: 워커가 HTTP 요청을 보내기 직전에 호출.
-        1. 고유 토큰 생성
-        2. 타겟 정보를 Redis에 매핑
-        3. 페이로드의 [OOB_HOST] 마커 치환
         """
-
         # 1. 8자리 고유 토큰 생성
         token = uuid.uuid4().hex[:8]
         
         # 실제 타겟에 주입될 도메인
         oob_host = f"{token}.{self.oob_domain}"
         
-        # Enum 타입일 수 있는 값들을 문자열로 변환
+        # Enum 타입 변환 방어 로직
         loc = getattr(surface, "param_location", "")
         loc_str = loc.name if hasattr(loc, "name") else str(loc)
         method_raw = getattr(surface, "method", "GET")
@@ -70,7 +69,7 @@ class BaseOOBModule(BaseModule):
         
         # 토큰을 키로 하여 TTL(24시간)과 함께 저장 (Fire & Forget)
         await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))
-        
+
         # 3. Payload 객체의 value 치환 후 복제본 반환
         new_value = payload.value.replace("[OOB_HOST]", oob_host)
         return dataclasses.replace(payload, value=new_value)
