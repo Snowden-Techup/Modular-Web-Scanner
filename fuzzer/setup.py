@@ -20,7 +20,7 @@ import uuid
 def select_modules(args) -> list:
     selected = []
 
-    current_scan_id = getattr(args, "scan_id", str(uuid.uuid4()))
+    current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
 
     if args.type in ("sqli", "all"):
         sqli_module = SQLiModule(
@@ -35,6 +35,7 @@ def select_modules(args) -> list:
         oob_sqli_module = OOB_SQLiModule(
             target_dbms=args.target_dbms,
             evasion_level=args.sqli_evasion_level,
+            scan_id=current_scan_id
             oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
             redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
         )
@@ -53,6 +54,7 @@ def select_modules(args) -> list:
         oob_osci_module = OOB_OSCiModule(
             target_os=args.target_os,
             evasion_level=args.osci_evasion_level,
+            scan_id=current_scan_id
             oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
             redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
         )

@@ -251,6 +251,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         },
     )
     args = _build_args_from_payload(request_payload)
+    args.scan_id = scan_id
     runtime_output = _runtime_scan_report_path(scan_id)
     runtime_output.parent.mkdir(parents=True, exist_ok=True)
     args.output = str(runtime_output)
