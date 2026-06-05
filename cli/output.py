@@ -44,6 +44,8 @@ def print_scan_configuration(
     level: int | None,
     target_dbms: str,
     target_os: str,
+    oob_domain: str,
+    redis_url: str,
     sqli_evasion_level: int,
     osci_evasion_level: int,
     lfi_evasion_level: int,
@@ -61,7 +63,10 @@ def print_scan_configuration(
 ) -> None:
     print("=" * 60)
     print(f"Target URL:     {base_url}")
-    print(f"[*] Target OS: {target_os}")
+    print(f"Target DBMS:    {target_dbms}")
+    print(f"Target OS:      {target_os}")
+    print(f"OOB Domain:     {oob_domain}")
+    print(f"Redis URL:      {redis_url}")
     print(f"Surface count:  {surface_count}")
     print(f"Attack type:    {attack_type}")
     print(f"Module count:   {module_count}")
@@ -95,4 +100,3 @@ def print_scan_configuration(
     print(f"Queue workers:  {queue_workers}")
     print(f"Session pool:   {session_pool_size}")
     print("=" * 60 + "\n")
-

