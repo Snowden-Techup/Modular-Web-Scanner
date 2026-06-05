@@ -4,11 +4,12 @@ import asyncio
 import json
 import re
 from typing import Optional, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
 
+from parsers.login_url_inference import iter_login_post_urls
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -265,16 +266,45 @@ class SessionManager:
         key, token = extracted
         return {key: token}
 
+    @staticmethod
+    def _auth_config_for_url(auth_config: AuthConfig, login_url: str) -> AuthConfig:
+        return AuthConfig(
+            login_url=login_url,
+            username=auth_config.username,
+            password=auth_config.password,
+            username_field=auth_config.username_field,
+            password_field=auth_config.password_field,
+            extra_fields=dict(auth_config.extra_fields or {}),
+            success_indicator=auth_config.success_indicator,
+            failure_indicator=auth_config.failure_indicator,
+            csrf_token_name=auth_config.csrf_token_name,
+            submit_field=auth_config.submit_field,
+            login_body_format=auth_config.login_body_format,
+        )
+
+    @staticmethod
+    def _api_login_path(url: str) -> bool:
+        return "/api/" in (urlparse(url).path or "").lower()
+
     async def login(self, auth_config: AuthConfig) -> bool:
         if self._session is None:
             await self.create_session()
 
+        candidates = iter_login_post_urls(auth_config.login_url)
+        for candidate_url in candidates:
+            trial = self._auth_config_for_url(auth_config, candidate_url)
+            if await self._login_once(trial):
+                return True
+        return False
+
+    async def _login_once(self, auth_config: AuthConfig) -> bool:
         forced_json = auth_config.login_body_format == "json"
+        api_login = self._api_login_path(auth_config.login_url)
         logger.info("로그인 시도: %s", auth_config.login_url)
         login_page = await self.get(auth_config.login_url)
 
         if not login_page:
-            if forced_json:
+            if forced_json or api_login:
                 logger.info(
                     "JSON 로그인: 로그인 URL GET 실패 — API 직접 POST만 시도합니다: %s",
                     auth_config.login_url,
@@ -289,7 +319,10 @@ class SessionManager:
         else:
             html = login_page.get("text", "")
 
-        body_format = self._resolve_login_body_format(auth_config, html)
+        if forced_json or api_login:
+            body_format = "json"
+        else:
+            body_format = self._resolve_login_body_format(auth_config, html)
         csrf_token = None
         if body_format != "json" and auth_config.csrf_token_name:
             csrf_token = self._extract_csrf_token(html, auth_config.csrf_token_name)

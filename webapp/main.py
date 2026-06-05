@@ -34,6 +34,7 @@ from webapp.db_service import (
 )
 from webapp.models import Scan, User
 from webapp.tasks import run_scan as celery_run_scan
+from modules.oob.client import DEFAULT_OAST_SERVER_URL
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"

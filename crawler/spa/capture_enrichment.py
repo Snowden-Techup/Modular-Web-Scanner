@@ -6,6 +6,11 @@ import json
 import re
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
+from parsers.body_field_inference import (
+    is_plausible_field_name,
+    merge_path_inferred_fields,
+    sanitize_field_map,
+)
 from parsers.http_method_inference import infer_body_params_from_path, infer_http_method_from_path
 
 from crawler.spa.capture_core import (
@@ -18,6 +23,7 @@ from crawler.spa.capture_core import (
     record_api_candidate,
     serialize_body_fields,
 )
+from crawler.spa.path_family import path_keys_share_body_field_family
 
 _DELETE_SEGMENT_RE = re.compile(r"^delete[a-z0-9_-]*$", re.IGNORECASE)
 _MUTATION_HINT_SEGMENTS = frozenset(
@@ -343,6 +349,58 @@ def enrich_source_urls(engine) -> int:
     return changed
 
 
+def merge_observed_body_fields_for_family(
+    engine,
+    path_key: str,
+    *,
+    local_fields: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """
+    같은 API 리소스 트리(예: /api/checkout/*)에서 관측된 body 필드를 합친다.
+    SPA는 confirm/process 등 형제 엔드포인트마다 XHR 본문이 달라 한 path_key만으로는 필드가 비는 경우가 많다.
+    """
+    samples = getattr(engine, "observed_body_samples", None) or {}
+    merged = sanitize_field_map(local_fields)
+    merged.update(sanitize_field_map(samples.get(path_key) or {}))
+
+    for sample_key, fields in samples.items():
+        if not fields or sample_key == path_key:
+            continue
+        if not path_keys_share_body_field_family(path_key, sample_key):
+            continue
+        for key, value in sanitize_field_map(fields).items():
+            if key not in merged or not str(merged.get(key) or "").strip():
+                merged[key] = str(value)
+    return merged
+
+
+def resolve_mutating_body_fields(
+    engine,
+    path_key: str,
+    *,
+    local_fields: dict[str, str] | None = None,
+    source_url: str = "",
+    url: str = "",
+) -> dict[str, str]:
+    """
+    XHR/DOM 관측 + 리소스 family + source URL + 경로 세그먼트 힌트를 순서대로 병합.
+    관측값은 유지하고, 누락된 키만 보강한다 (범용 SPA surface 구축).
+    """
+    body_samples = getattr(engine, "observed_body_samples", None) or {}
+    seed = dict(local_fields or {})
+    if not seed:
+        seed = dict(body_samples.get(path_key) or {})
+    fields = merge_observed_body_fields_for_family(
+        engine,
+        path_key,
+        local_fields=seed,
+    )
+    if not fields and url:
+        fields = infer_body_params_from_path(url)
+    fields = hydrate_fields_from_source_context(fields, source_url)
+    return merge_path_inferred_fields(sanitize_field_map(fields), path_key)
+
+
 def hydrate_fields_from_source_context(fields: dict[str, str], source_url: str) -> dict[str, str]:
     if not fields or not source_url:
         return fields
@@ -354,15 +412,12 @@ def hydrate_fields_from_source_context(fields: dict[str, str], source_url: str) 
     if not q:
         return fields
     hydrated = dict(fields)
-    if "post_type" in hydrated and not str(hydrated.get("post_type") or "").strip():
-        mapped = str(q.get("post_type") or q.get("type") or "").strip()
+    for key in list(hydrated.keys()):
+        if str(hydrated.get(key) or "").strip():
+            continue
+        mapped = str(q.get(key) or "").strip()
         if mapped:
-            hydrated["post_type"] = mapped
-    for key in ("order_id", "book_id", "id"):
-        if key in hydrated and not str(hydrated.get(key) or "").strip():
-            mapped = str(q.get(key) or "").strip()
-            if mapped:
-                hydrated[key] = mapped
+            hydrated[key] = mapped
     return hydrated
 
 
@@ -520,25 +575,35 @@ def normalize_mutating_path_endpoints(engine) -> int:
             continue
         path_key = path_key_from_url(url)
         source_url = best_source_url_for_path(engine, path_key) or str(entry.get("source_url") or "")
-        fields = dict(body_samples.get(path_key) or {})
-        if not fields:
-            fields = infer_body_params_from_path(url)
+        existing_fields = parse_payload_fields(
+            entry.get("post_data") or "", entry.get("req_content_type") or ""
+        )
+        fields = resolve_mutating_body_fields(
+            engine,
+            path_key,
+            local_fields=existing_fields,
+            source_url=source_url,
+            url=url,
+        )
         if not fields and promote_get_api:
-            # Generic fallback for API endpoints that look mutating but had no captured body.
-            # Keep conservative: single id key so modules can at least execute probe requests.
             fields = {"id": ""}
-        fields = hydrate_fields_from_source_context(fields, source_url)
         if not fields:
             continue
         content_type = body_cts.get(path_key, "application/json")
         post_data, req_ct = serialize_body_fields(fields, content_type)
+        file_map = getattr(engine, "observed_body_file_fields", None) or {}
+        path_file_fields = sorted(file_map.get(path_key) or ())
+        if path_file_fields:
+            req_ct = "multipart/form-data"
+            entry["file_fields"] = path_file_fields
 
-        if str(entry.get("method") or "GET").upper() != "POST" or not entry.get("post_data"):
-            entry["method"] = "POST"
-            entry["post_data"] = post_data
-            entry["req_content_type"] = req_ct
+        prior_post = entry.get("post_data")
+        entry["method"] = "POST"
+        entry["post_data"] = post_data
+        entry["req_content_type"] = req_ct
+        if prior_post != post_data:
             source = str(entry.get("source") or "")
-            if source in ("js-static", ""):
+            if source in ("js-static", "") and not existing_fields:
                 entry["source"] = "path-inferred"
             changed += 1
         if source_url and not str(entry.get("source_url") or "").strip():
@@ -558,6 +623,10 @@ def enrich_api_endpoints_from_observations(engine) -> int:
             continue
         content_type = body_cts.get(path_key, "application/json")
         post_data, req_content_type = serialize_body_fields(fields, content_type)
+        file_map = getattr(engine, "observed_body_file_fields", None) or {}
+        path_file_fields = sorted(file_map.get(path_key) or ())
+        if path_file_fields:
+            req_content_type = "multipart/form-data"
 
         for entry in list(engine.api_endpoints.values()):
             if path_key_from_url(entry.get("url") or "") != path_key:
@@ -565,9 +634,26 @@ def enrich_api_endpoints_from_observations(engine) -> int:
             if str(entry.get("method") or "GET").upper() not in _MUTATING_METHODS:
                 continue
             if entry.get("post_data"):
+                existing = parse_payload_fields(
+                    entry.get("post_data") or "", entry.get("req_content_type") or ""
+                )
+                merged = resolve_mutating_body_fields(
+                    engine,
+                    path_key,
+                    local_fields=existing,
+                    source_url=str(entry.get("source_url") or ""),
+                    url=str(entry.get("url") or ""),
+                )
+                merged_post, merged_ct = serialize_body_fields(merged, content_type)
+                if merged_post != entry.get("post_data"):
+                    entry["post_data"] = merged_post
+                    entry["req_content_type"] = merged_ct
+                    added += 1
                 continue
             entry["post_data"] = post_data
             entry["req_content_type"] = req_content_type
+            if path_file_fields:
+                entry["file_fields"] = path_file_fields
             if str(entry.get("source") or "") == "js-static":
                 entry["source"] = "observed-body"
 

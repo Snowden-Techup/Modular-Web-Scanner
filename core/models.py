@@ -136,6 +136,8 @@ class AttackSurface:
     description: str | None = None
     depth: int = 0
     content_type: str | None = None
+    request_content_type: str | None = None
+    file_field_names: tuple[str, ...] = field(default_factory=tuple)
     graphql_arg_types: Dict[str, str] = field(default_factory=dict)
     parameter_confidence: Dict[str, str] = field(default_factory=dict)
 
@@ -160,6 +162,8 @@ class AttackSurface:
             'description': self.description,
             'depth': self.depth,
             'content_type': self.content_type,
+            'request_content_type': self.request_content_type,
+            'file_field_names': list(self.file_field_names),
             'graphql_arg_types': self.graphql_arg_types,
             'parameter_confidence': self.parameter_confidence,
         }
@@ -179,6 +183,8 @@ class AttackSurface:
             description=data.get('description'),
             depth=data.get('depth', 0),
             content_type=data.get('content_type'),
+            request_content_type=data.get('request_content_type'),
+            file_field_names=tuple(data.get('file_field_names') or ()),
             graphql_arg_types=_normalize_graphql_arg_types(data.get('graphql_arg_types', {})),
             parameter_confidence=_normalize_parameter_confidence(data.get('parameter_confidence', {})),
         )

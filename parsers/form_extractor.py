@@ -31,6 +31,7 @@ class FormInfo(TypedDict):
     raw_html: str
     csrf_token: NotRequired[Optional[CSRFTokenInfo]]
     is_file_upload: NotRequired[bool]
+    file_field_names: NotRequired[List[str]]
     risk_level: NotRequired[str]
     data_content_type: NotRequired[str]
     data_orig_method: NotRequired[str]
@@ -96,6 +97,7 @@ def extract_forms(
             # 2. 파라미터 수집
             params: Dict[str, Any] = {}
             has_file_input = False
+            file_field_names: List[str] = []
 
             for el in form.find_all(['input', 'textarea', 'select', 'button']):
                 name = _get_attr_str(el, 'name').strip()
@@ -115,6 +117,7 @@ def extract_forms(
                     val = _get_attr_str(el, 'value')
                 elif el_type == 'file':
                     has_file_input = True
+                    file_field_names.append(name)
                     val = ""
                 elif el_type in ('checkbox', 'radio'):
                     if el.has_attr('checked'):
@@ -176,6 +179,7 @@ def extract_forms(
                 'raw_html': _get_limited_raw_html(form),
                 'csrf_token': csrf_info,
                 'is_file_upload': has_file_input or (enctype in UPLOAD_ENCTYPES),
+                'file_field_names': file_field_names,
                 'risk_level': risk_level
             })
 
