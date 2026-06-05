@@ -1072,11 +1072,25 @@
             <div id="detailPanelSqli" class="module-detail-panel">
             <div class="row g-2 mb-3">
               <div class="col-12 hint">SQLi</div>
-              <div class="col-md-6">
+              <div class="col-md-4">
+                <label class="form-label" for="sqli_target_dbms">대상 DBMS</label>
+                <select id="sqli_target_dbms" class="form-select">
+                  <option value="all" selected>all</option>
+                  <option value="mysql">mysql</option>
+                  <option value="mssql">mssql</option>
+                  <option value="oracle">oracle</option>
+                  <option value="postgres">postgres</option>
+                  <option value="sqlite">sqlite</option>
+                  <option value="access">access</option>
+                </select>
+                <div class="field-help">--target-dbms (기본: all)</div>
+              </div>
+              <div class="col-md-4">
                 <label class="form-label" for="max_time_payloads">시간기반 상한</label>
                 <input id="max_time_payloads" type="number" class="form-control" min="0" value="0">
+                <div class="field-help">0이면 전체 사용 (시간기반 포함 시)</div>
               </div>
-              <div class="col-md-6 d-flex align-items-end">
+              <div class="col-md-4 d-flex align-items-end">
                 <div class="form-check mb-2">
                   <input id="include_time_based" type="checkbox" class="form-check-input">
                   <label for="include_time_based" class="form-check-label">시간기반 포함</label>
@@ -1984,6 +1998,7 @@
           graphql_unsafe: document.getElementById("graphql_unsafe").checked
         },
         sqli: {
+          target_dbms: document.getElementById("sqli_target_dbms").value,
           include_time_based: document.getElementById("include_time_based").checked,
           max_time_payloads: toInt("max_time_payloads", 0)
         },
