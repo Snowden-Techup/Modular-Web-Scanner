@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--type",
         type=str,
         default="all",
-        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "oob", "all"],
+        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "ssti", "oob", "all"],
         help=(
             "Attack category (default: all). For bruteforce without --bf-target-url, "
             "surfaces come from the crawler; BruteforceModule.get_target_parameters filters targets."
@@ -366,6 +366,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="reflected_XSS payload mutation level (0=off/raw, 1=basic WAF bypass, 2=advanced/encoding, 3=obfuscation)"
     )
+    parser.add_argument(
+        "--ssti-evasion-level",
+        type=int, choices=[0, 1, 2, 3], default=0,
+        help="SSTI evasion (Phase 2; 0=off)",
+    )
+    parser.add_argument(
+        "--ssti-max-payloads",
+        type=int, default=None,
+        help="SSTI payload cap for quick tests (default: all)",
+    )
+    
      # ── OOB / OAST 옵션 ──────────────────────────────────────────────────────
     parser.add_argument(
         "--oob-server",

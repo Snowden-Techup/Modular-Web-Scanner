@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -52,6 +53,7 @@ SCAN_TYPES = [
     "ssrf",
     "stored_xss",
     "reflected_xss",
+    "ssti",
     "oob",
 ]
 
@@ -137,6 +139,14 @@ class ReflectedXSSOptions(BaseModel):
     evasion_level: int = Field(default=1, ge=0, le=3)
 
 
+class SSTIOptions(BaseModel):
+    max_payloads: int = Field(
+        default=0,
+        ge=0,
+        description="0=전체 페이로드, 0보다 크면 빠른 테스트용 상한",
+    )
+
+
 class OOBOptions(BaseModel):
     oob_server: str = Field(
         default=DEFAULT_OAST_SERVER_URL,
@@ -159,6 +169,7 @@ class ScanRequest(BaseModel):
         "ssrf",
         "stored_xss",
         "reflected_xss",
+        "ssti",
         "oob",
     ] = "all"
     level: int = Field(default=1, ge=0, le=3)
@@ -171,6 +182,7 @@ class ScanRequest(BaseModel):
     ssrf: SSRFOptions = Field(default_factory=SSRFOptions)
     stored_xss: StoredXSSOptions = Field(default_factory=StoredXSSOptions)
     reflected_xss: ReflectedXSSOptions = Field(default_factory=ReflectedXSSOptions)
+    ssti: SSTIOptions = Field(default_factory=SSTIOptions)
     oob: OOBOptions = Field(default_factory=OOBOptions)
 
     model_config = {"populate_by_name": True}
