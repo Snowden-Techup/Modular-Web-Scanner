@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from core import AttackSurface
 from fuzzer.engine import FuzzerEngine
 from modules.bruteforce.module import BruteforceModule
@@ -16,118 +19,137 @@ from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
 
-ALL_PIPELINE_MODULE_TYPES = [
-    "sqli",
-    "osci",
-    "lfi",
-    "file_upload",
-    "ssrf",
-    "stored_xss",
-    "reflected_xss",
-]
+# (module_type, accepted args.type values, factory)
+_ModuleDef = tuple[str, tuple[str, ...], Callable[[Any], Any]]
 
 
-def select_modules(args) -> list:
-    selected = []
-
+def _module_defs(args) -> list[_ModuleDef]:
+    """
+    `-t all` 파이프라인 순서 = 아래 목록 순서.
+    새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
+    """
     current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
 
-    if args.type in ("sqli", "all"):
-        sqli_module = SQLiModule(
-            include_time_based=args.sqli_time_based,
-            max_time_payloads=args.sqli_time_max,
-            evasion_level=args.sqli_evasion_level,
-            target_dbms=args.target_dbms,
-        )
-        selected.append(sqli_module)
-
-    if args.type in ("oob_sqli", "all"):
-        oob_sqli_module = OOB_SQLiModule(
-            target_dbms=args.target_dbms,
-            evasion_level=args.sqli_evasion_level,
-            scan_id=current_scan_id,
-            oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
-            redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
-        )
-        selected.append(oob_sqli_module)
-
-    if args.type in ("osci", "all"):
-        osci_module = OSCiModule(
-            include_time_based=args.osci_time_based,
-            max_time_payloads=args.osci_time_max,
-            evasion_level=args.osci_evasion_level,
-            target_os=args.target_os,
-        )
-        selected.append(osci_module)
-
-    if args.type in ("oob_osci", "all"):
-        oob_osci_module = OOB_OSCiModule(
-            target_os=args.target_os,
-            evasion_level=args.osci_evasion_level,
-            scan_id=current_scan_id,
-            oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
-            redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
-        )
-        selected.append(oob_osci_module)
-
-    if args.type == "bruteforce":
-        bruteforce_module = BruteforceModule(
-            wordlist_path=args.bf_wordlist,
-            enable_mutation=not args.bf_disable_mutation,
-            mutation_level=args.bf_mutation_level,
-            enable_true_bruteforce=args.bf_true_random,
-            bf_charset=args.bf_charset,
-            bf_min_length=args.bf_min_length,
-            bf_max_length=args.bf_max_length,
-            max_dictionary_candidates=args.bf_max_dictionary,
-            max_true_bf_candidates=args.bf_max_true_random,
-            stop_on_first_hit=args.bf_stop_on_first_hit,
-            username_param=args.bf_username_param,
-            bf_username=args.bf_username,
-            bf_target_param=args.bf_target_param,
-        )
-        selected.append(bruteforce_module)
-
-    if args.type in ("lfi", "all"):
-        selected.append(LFIModule(evasion_level=args.lfi_evasion_level))
-
-    if args.type in ("file_upload", "all"):
-        selected.append(FileUploadModule())
-
-    if args.type in ("ssrf", "all"):
-        selected.append(
-            SSRFModule(
+    return [
+        (
+            "sqli",
+            ("sqli", "all"),
+            lambda: SQLiModule(
+                include_time_based=args.sqli_time_based,
+                max_time_payloads=args.sqli_time_max,
+                evasion_level=args.sqli_evasion_level,
+                target_dbms=args.target_dbms,
+            ),
+        ),
+        (
+            "oob_sqli",
+            ("oob_sqli", "all"),
+            lambda: OOB_SQLiModule(
+                target_dbms=args.target_dbms,
+                evasion_level=args.sqli_evasion_level,
+                scan_id=current_scan_id,
+                oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
+                redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+            ),
+        ),
+        (
+            "osci",
+            ("osci", "all"),
+            lambda: OSCiModule(
+                include_time_based=args.osci_time_based,
+                max_time_payloads=args.osci_time_max,
+                evasion_level=args.osci_evasion_level,
+                target_os=args.target_os,
+            ),
+        ),
+        (
+            "oob_osci",
+            ("oob_osci", "all"),
+            lambda: OOB_OSCiModule(
+                target_os=args.target_os,
+                evasion_level=args.osci_evasion_level,
+                scan_id=current_scan_id,
+                oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
+                redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+            ),
+        ),
+        (
+            "lfi",
+            ("lfi", "all"),
+            lambda: LFIModule(evasion_level=args.lfi_evasion_level),
+        ),
+        (
+            "file_upload",
+            ("file_upload", "all"),
+            lambda: FileUploadModule(),
+        ),
+        (
+            "ssrf",
+            ("ssrf", "all"),
+            lambda: SSRFModule(
                 include_oob_templates=args.ssrf_oob,
                 bypass_level=args.ssrf_evasion_level,
-            )
-        )
-        
-    if args.type in ("stored_xss", "all"):
-        sxss_categories = getattr(args, "sxss_categories", None) or []
-        sxss_target_params = getattr(args, "sxss_target_params", None) or []
-        selected.append(
-            StoredXSSModule(
+            ),
+        ),
+        (
+            "stored_xss",
+            ("stored_xss", "all"),
+            lambda: StoredXSSModule(
                 bypass_level=getattr(args, "sxss_evasion_level", 1),
                 scan_mode=getattr(args, "sxss_scan_mode", "full"),
                 max_risk_level=getattr(args, "sxss_max_risk_level", "Critical"),
-                categories=sxss_categories if sxss_categories else None,
-                target_params=sxss_target_params if sxss_target_params else None,
-            )
-        )
-        
-    if args.type in ("reflected_xss", "all"):
-        selected.append(
-            ReflectedXSSModule(
-                evasion_level=args.rxss_evasion_level
-            )
-        )
-    if args.type in ("ssti", "all"):
-        selected.append(
-            SSTIModule(
+                categories=(getattr(args, "sxss_categories", None) or []) or None,
+                target_params=(getattr(args, "sxss_target_params", None) or []) or None,
+            ),
+        ),
+        (
+            "reflected_xss",
+            ("reflected_xss", "all"),
+            lambda: ReflectedXSSModule(
+                evasion_level=args.rxss_evasion_level,
+            ),
+        ),
+        (
+            "ssti",
+            ("ssti", "all"),
+            lambda: SSTIModule(
                 evasion_level=getattr(args, "ssti_evasion_level", 0),
                 max_payloads=getattr(args, "ssti_max_payloads", None),
+            ),
+        ),
+    ]
+
+
+def pipeline_module_types(args) -> list[str]:
+    """`-t all` 순차 실행 대상. `_module_defs()`에서 `"all"` 포함 항목을 자동 추출."""
+    return [module_type for module_type, accepted, _ in _module_defs(args) if "all" in accepted]
+
+
+def select_modules(args) -> list:
+    selected = [
+        build()
+        for _module_type, accepted, build in _module_defs(args)
+        if args.type in accepted
+    ]
+
+    if args.type == "bruteforce":
+        selected.append(
+            BruteforceModule(
+                wordlist_path=args.bf_wordlist,
+                enable_mutation=not args.bf_disable_mutation,
+                mutation_level=args.bf_mutation_level,
+                enable_true_bruteforce=args.bf_true_random,
+                bf_charset=args.bf_charset,
+                bf_min_length=args.bf_min_length,
+                bf_max_length=args.bf_max_length,
+                max_dictionary_candidates=args.bf_max_dictionary,
+                max_true_bf_candidates=args.bf_max_true_random,
+                stop_on_first_hit=args.bf_stop_on_first_hit,
+                username_param=args.bf_username_param,
+                bf_username=args.bf_username,
+                bf_target_param=args.bf_target_param,
             )
-        )  
+        )
 
     if args.type == "oob":
         oast_server = normalize_oast_server_url(getattr(args, "oob_server", "") or "")

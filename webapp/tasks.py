@@ -253,20 +253,21 @@ async def _async_run_scan_pipeline(
     from fuzzer import EngineStats, FuzzerEngine
     from fuzzer.auth_provider import scan_auth_lifecycle
     from fuzzer.request_builder import build_and_send_request
-    from fuzzer.setup import ALL_PIPELINE_MODULE_TYPES, estimate_total_requests, select_modules
+    from fuzzer.setup import estimate_total_requests, pipeline_module_types, select_modules
     from reporter import ReportGenerator
     from reporter.dedupe import full_report_path
 
     # ── 1. 전체 예상 요청 수 사전 계산 (진행바 분모) ─────────────────────────
+    pipeline_types = pipeline_module_types(args)
     module_totals: dict[str, int] = {}
-    for mtype in ALL_PIPELINE_MODULE_TYPES:
+    for mtype in pipeline_types:
         mod_args = copy.copy(args)
         mod_args.type = mtype
         mods = select_modules(mod_args)
         if mods:
             module_totals[mtype] = estimate_total_requests(surfaces, mods)
     overall_total = max(1, sum(module_totals.values()))
-    n_modules = len([t for t in ALL_PIPELINE_MODULE_TYPES if module_totals.get(t, 0) > 0])
+    n_modules = len([t for t in pipeline_types if module_totals.get(t, 0) > 0])
 
     await _scan_update(
         scan_id,
@@ -302,7 +303,7 @@ async def _async_run_scan_pipeline(
     module_run_idx = 0
 
     async with scan_auth_lifecycle(args, base_cookies=cookies):
-        for module_type in ALL_PIPELINE_MODULE_TYPES:
+        for module_type in pipeline_types:
             if module_totals.get(module_type, 0) == 0:
                 continue
 

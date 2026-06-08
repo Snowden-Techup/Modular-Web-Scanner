@@ -10,7 +10,7 @@ from cli.output import print_scan_configuration, progress_printer
 from fuzzer import EngineStats, FuzzerEngine
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request
-from fuzzer.setup import ALL_PIPELINE_MODULE_TYPES, count_module_payloads, estimate_total_requests, select_modules
+from fuzzer.setup import count_module_payloads, estimate_total_requests, pipeline_module_types, select_modules
 from reporter import ReportGenerator
 
 
@@ -133,25 +133,27 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
 
     scan_cookies = parse_cookies(args.cookie) if getattr(args, "cookie", "") else {}
 
+    pipeline_types = pipeline_module_types(args)
+
     separator = "=" * 60
     print(f"\n{separator}")
-    print(f"Pipeline mode: {len(ALL_PIPELINE_MODULE_TYPES)} modules will run sequentially.")
+    print(f"Pipeline mode: {len(pipeline_types)} modules will run sequentially.")
     print(f"Intermediate reports: {out_path.stem}_<module>{out_path.suffix}")
     print(f"Final merged report : {out_path.name}")
     print(separator)
 
     async with scan_auth_lifecycle(args, base_cookies=scan_cookies):
-        for idx, module_type in enumerate(ALL_PIPELINE_MODULE_TYPES, 1):
+        for idx, module_type in enumerate(pipeline_types, 1):
             mod_args = copy.copy(args)
             mod_args.type = module_type
 
             context = prepare_scan_context(mod_args, surfaces)
             if context is None:
-                print(f"\n[{idx}/{len(ALL_PIPELINE_MODULE_TYPES)}] {module_type}: skipped (no payloads/surfaces).")
+                print(f"\n[{idx}/{len(pipeline_types)}] {module_type}: skipped (no payloads/surfaces).")
                 continue
 
             print(f"\n{separator}")
-            print(f"[{idx}/{len(ALL_PIPELINE_MODULE_TYPES)}] Module: {module_type}  ({context['total_requests']} requests)")
+            print(f"[{idx}/{len(pipeline_types)}] Module: {module_type}  ({context['total_requests']} requests)")
             print(separator)
 
             engine = FuzzerEngine(
