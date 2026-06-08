@@ -99,7 +99,6 @@ async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
                                 protocol = hit.get("protocol", "Unknown")
                                 client_ip = hit.get("source_ip", "Unknown")
                                 
-                                print(f"[+] [OOB Hit] Vulnerability Verified on {target_url} (Param: {param_name}) via {protocol}")
                                 dummy_response = FuzzerResponse(
                                     status=0, text="", headers={}, elapsed_time=0.0, url=target_url, error="OOB Callback (No Response)"
                                 )
