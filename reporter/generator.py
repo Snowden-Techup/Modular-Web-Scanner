@@ -212,20 +212,11 @@ class ReportGenerator:
         result.sort(key=lambda g: (_severity_rank(g["severity"]), g["attack_type"]))
         return result
 
-    def export_to_json(self, filepath: str = "scan_result.json") -> None:
-        """
-        Writes a deduplicated report to ``filepath`` (one PoC per URL / parameter / type)
-        and the complete per-payload list to ``<stem>_full<suffix>``.
-        """
+    def build_full_report(self) -> dict[str, Any]:
         full_vulnerabilities = [
             self._finding_to_dict(f) for f in sorted(self.findings, key=_finding_sort_key)
         ]
-        discovery_vulnerabilities = [self._finding_to_dict(f) for f in self.findings]
-        deduped = dedupe_vulnerabilities(discovery_vulnerabilities, mode="first_in_order")
-        deduped_sorted = sorted(deduped, key=vulnerability_sort_key)
-        grouped = self._group_vulnerabilities_by_type(deduped_sorted)
-
-        full_report: dict[str, Any] = {
+        return {
             "metadata": {
                 "scan_time": self.timestamp,
                 "summary": {
@@ -237,7 +228,13 @@ class ReportGenerator:
             },
             "vulnerabilities": full_vulnerabilities,
         }
-        deduped_report: dict[str, Any] = {
+
+    def build_deduped_report(self) -> dict[str, Any]:
+        discovery_vulnerabilities = [self._finding_to_dict(f) for f in self.findings]
+        deduped = dedupe_vulnerabilities(discovery_vulnerabilities, mode="first_in_order")
+        deduped_sorted = sorted(deduped, key=vulnerability_sort_key)
+        grouped = self._group_vulnerabilities_by_type(deduped_sorted)
+        return {
             "metadata": {
                 "scan_time": self.timestamp,
                 "summary": {
@@ -251,6 +248,14 @@ class ReportGenerator:
             },
             "vulnerabilities": grouped,
         }
+
+    def export_to_json(self, filepath: str = "scan_result.json") -> None:
+        """
+        Writes a deduplicated report to ``filepath`` (one PoC per URL / parameter / type)
+        and the complete per-payload list to ``<stem>_full<suffix>``.
+        """
+        full_report = self.build_full_report()
+        deduped_report = self.build_deduped_report()
 
         full_path = full_report_path(filepath)
         with open(filepath, "w", encoding="utf-8") as file:

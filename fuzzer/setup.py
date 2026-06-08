@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -26,32 +27,11 @@ _ModuleDef = tuple[str, tuple[str, ...], Callable[[Any], Any]]
 def _module_defs(args) -> list[_ModuleDef]:
     """
     `-t all` 파이프라인 순서 = 아래 목록 순서.
+    sqli 는 의도적으로 맨 마지막에 실행한다.
+    oob / oob_osci / oob_sqli 는 파이프라인 제외 (select_modules 특수 분기).
     새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
     """
-    current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
-
     return [
-        (
-            "sqli",
-            ("sqli", "all"),
-            lambda: SQLiModule(
-                include_time_based=args.sqli_time_based,
-                max_time_payloads=args.sqli_time_max,
-                evasion_level=args.sqli_evasion_level,
-                target_dbms=args.target_dbms,
-            ),
-        ),
-        (
-            "oob_sqli",
-            ("oob_sqli", "all"),
-            lambda: OOB_SQLiModule(
-                target_dbms=args.target_dbms,
-                evasion_level=args.sqli_evasion_level,
-                scan_id=current_scan_id,
-                oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
-                redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
-            ),
-        ),
         (
             "osci",
             ("osci", "all"),
@@ -60,17 +40,6 @@ def _module_defs(args) -> list[_ModuleDef]:
                 max_time_payloads=args.osci_time_max,
                 evasion_level=args.osci_evasion_level,
                 target_os=args.target_os,
-            ),
-        ),
-        (
-            "oob_osci",
-            ("oob_osci", "all"),
-            lambda: OOB_OSCiModule(
-                target_os=args.target_os,
-                evasion_level=args.osci_evasion_level,
-                scan_id=current_scan_id,
-                oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
-                redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
             ),
         ),
         (
@@ -117,6 +86,16 @@ def _module_defs(args) -> list[_ModuleDef]:
                 max_payloads=getattr(args, "ssti_max_payloads", None),
             ),
         ),
+        (
+            "sqli",
+            ("sqli", "all"),
+            lambda: SQLiModule(
+                include_time_based=args.sqli_time_based,
+                max_time_payloads=args.sqli_time_max,
+                evasion_level=args.sqli_evasion_level,
+                target_dbms=args.target_dbms,
+            ),
+        ),
     ]
 
 
@@ -161,6 +140,31 @@ def select_modules(args) -> list:
         )
         selected.append(OOBModule(oast_client=oast_client))
         print(f"[*] OAST server: {oast_server}")
+
+    if args.type in ("oob_osci", "oob_sqli"):
+        current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
+        oob_domain = getattr(args, "oob_domain", None) or os.getenv("OOB_DOMAIN", "oob.snowden.kr")
+        redis_url = getattr(args, "redis_url", None) or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        if args.type == "oob_osci":
+            selected.append(
+                OOB_OSCiModule(
+                    target_os=args.target_os,
+                    evasion_level=args.osci_evasion_level,
+                    scan_id=current_scan_id,
+                    oob_domain=oob_domain,
+                    redis_url=redis_url,
+                )
+            )
+        else:
+            selected.append(
+                OOB_SQLiModule(
+                    target_dbms=args.target_dbms,
+                    evasion_level=args.sqli_evasion_level,
+                    scan_id=current_scan_id,
+                    oob_domain=oob_domain,
+                    redis_url=redis_url,
+                )
+            )
 
     return selected
 

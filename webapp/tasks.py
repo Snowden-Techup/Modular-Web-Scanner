@@ -214,6 +214,54 @@ async def _scan_update(scan_id: str, **fields) -> None:
     await asyncio.to_thread(update_scan_fields, scan_id, **fields)
 
 
+def _persist_pipeline_partial_report(
+    scan_id: str,
+    *,
+    runtime_output: Path,
+    all_findings: list,
+    merged_stats,
+    summary: dict,
+) -> None:
+    """모듈 완료 직후 누적 리포트를 파일·DB에 반영 (다음 모듈 시작 전)."""
+    from reporter import ReportGenerator
+
+    reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
+    report_json = reporter.build_deduped_report()
+    reporter.export_to_json(str(runtime_output))
+
+    scan_pk = get_scan_pk(scan_id)
+    if scan_pk is not None:
+        replace_scan_findings(scan_pk, _serialize_findings(all_findings))
+
+    update_scan_fields(scan_id, report_json=report_json, summary=summary)
+
+
+async def _flush_pipeline_partial_report(
+    scan_id: str,
+    *,
+    runtime_output: Path,
+    all_findings: list,
+    merged_stats,
+    summary: dict,
+    module_type: str,
+    module_run_idx: int,
+    n_modules: int,
+) -> None:
+    await asyncio.to_thread(
+        _persist_pipeline_partial_report,
+        scan_id,
+        runtime_output=runtime_output,
+        all_findings=all_findings,
+        merged_stats=merged_stats,
+        summary=summary,
+    )
+    await _scan_log(
+        scan_id,
+        f"[Pipeline] 누적 리포트 갱신 ({module_run_idx}/{n_modules} {module_type} 완료, "
+        f"findings={merged_stats.findings})",
+    )
+
+
 def _runtime_scan_report_path(scan_id: str) -> Path:
     return SCAN_RUNTIME_REPORT_DIR / scan_id / "scan_report.json"
 
@@ -416,6 +464,30 @@ async def _async_run_scan_pipeline(
             merged_stats.completed += stats.completed
             merged_stats.failures += stats.failures
             merged_stats.findings += stats.findings
+
+            partial_summary = {
+                "phase": "fuzzing",
+                "current_module": module_type,
+                "module_index": module_run_idx,
+                "module_count": n_modules,
+                "queued": overall_total,
+                "completed": cumulative_completed,
+                "failures": merged_stats.failures,
+                "findings": cumulative_findings,
+                "elapsed_time": round(time.monotonic() - started_at, 2),
+                "total_requests": overall_total,
+                "planned_requests": overall_total,
+            }
+            await _flush_pipeline_partial_report(
+                scan_id,
+                runtime_output=runtime_output,
+                all_findings=all_findings,
+                merged_stats=merged_stats,
+                summary=partial_summary,
+                module_type=module_type,
+                module_run_idx=module_run_idx,
+                n_modules=n_modules,
+            )
 
     # ── 3. 최종 합산 리포트 저장 ──────────────────────────────────────────────
     final_reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
