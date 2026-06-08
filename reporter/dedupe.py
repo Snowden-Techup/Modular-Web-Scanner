@@ -367,6 +367,17 @@ _BRUTEFORCE_GUIDE = (
     "타깃 로그인 ID 식별 코드 기준의 다중 계층 처리율 제한(Rate Limiting) 방어 모델을 도입하고, 비정상적인 "
     "로그 흐름을 모니터링하여 이상 감지 시 멀티 팩터 인증(MFA) 또는 CAPTCHA 시스템을 트리거해야 합니다."
 )
+_SSTI_GUIDE = (
+    "사용자 입력값을 템플릿 소스 문자열에 직접 결합하거나 render/evaluate 계열 API에 원시 문자열로 전달하지 "
+    "마십시오. f-string, format(), String.format(), 템플릿 리터럴 등으로 동적 템플릿 본문을 조립하는 패턴을 "
+    "금지하고, 정적 템플릿 파일과 데이터 컨텍스트를 분리하여 프레임워크가 제공하는 안전한 변수 바인딩 "
+    "(Jinja2 render(context), Thymeleaf Model, Razor ViewData 등)만 사용하십시오. Jinja2·Twig·Freemarker 등 "
+    "서버 템플릿 엔진을 사용할 때는 샌드박스 모드와 autoescape를 활성화하고, __import__, eval, exec, "
+    "os/system 등 위험 빌트인·헬퍼에 대한 접근을 엔진 설정 또는 정책으로 차단해야 합니다. 사용자 입력이 "
+    "템플릿 문법({{ }}, ${ }, <% %>, #{ } 등)을 포함할 수 있는 경우, 템플릿 렌더링 전 HTML 엔티티 인코딩 "
+    "또는 허용 문자 화이트리스트 검증을 적용하고, 불가피한 동적 콘텐츠 조합이 필요하다면 템플릿 엔진 대신 "
+    "순수 문자열 치환 없는 로직 레이어에서 안전하게 조립하십시오."
+)
 
 _OOB_GUIDE = (
     "아웃바운드 HTTP/DNS 요청이 외부 서버에서 확인된 경우, 서버 측 코드가 사용자 입력값을 "
@@ -388,6 +399,7 @@ _SSRF_REF = "OWASP Top 10:2021 A10:Server-Side Request Forgery / CWE-918"
 _FILEUPLOAD_REF = "OWASP Top 10:2021 A04:Insecure Design / CWE-434"
 _XSS_REF = "OWASP Top 10:2021 A03:Injection / CWE-79"
 _BRUTEFORCE_REF = "OWASP Top 10:2021 A07:Identification and Authentication Failures / CWE-307"
+_SSTI_REF = "OWASP Top 10:2021 A03:Injection / CWE-1336 (Server-Side Template Injection)"
 
 SECURE_CODING_DB: dict[str, dict[str, str]] = {
     "OOB-Callback": {"reference": _OOB_REF, "secure_coding_guide": _OOB_GUIDE},
@@ -432,9 +444,15 @@ SECURE_CODING_DB: dict[str, dict[str, str]] = {
     "Stored XSS": {"reference": _XSS_REF, "secure_coding_guide": _STORED_XSS_GUIDE},
     "Reflected XSS": {"reference": _XSS_REF, "secure_coding_guide": _REFLECTED_XSS_GUIDE},
     "Bruteforce": {"reference": _BRUTEFORCE_REF, "secure_coding_guide": _BRUTEFORCE_GUIDE},
+    "SSTI": {"reference": _SSTI_REF, "secure_coding_guide": _SSTI_GUIDE},
 }
 
 
 def get_attack_guidance(attack_type: str) -> dict[str, str]:
     """Return reference mapping and secure coding guide for the given attack type."""
-    return SECURE_CODING_DB.get(attack_type, {})
+    key = str(attack_type or "").strip()
+    if key in SECURE_CODING_DB:
+        return SECURE_CODING_DB[key]
+    if key.lower() == "ssti" or key.startswith("ssti:"):
+        return {"reference": _SSTI_REF, "secure_coding_guide": _SSTI_GUIDE}
+    return {}

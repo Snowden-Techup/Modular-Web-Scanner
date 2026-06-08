@@ -10,11 +10,16 @@ from modules.osci.module import OSCiModule
 from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
+from modules.ssti.module import SSTIModule
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, OASTClient, normalize_oast_server_url
 from modules.oob.module import OOBModule
+from modules.oob_osci.module import OOB_OSCiModule
+from modules.oob_sqli.module import OOB_SQLiModule
 
 def select_modules(args) -> list:
     selected = []
+
+    current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
 
     if args.type in ("sqli", "all"):
         sqli_module = SQLiModule(
@@ -25,6 +30,16 @@ def select_modules(args) -> list:
         )
         selected.append(sqli_module)
 
+    if args.type in ("oob_sqli", "all"):
+        oob_sqli_module = OOB_SQLiModule(
+            target_dbms=args.target_dbms,
+            evasion_level=args.sqli_evasion_level,
+            scan_id=current_scan_id,
+            oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
+            redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+        )
+        selected.append(oob_sqli_module)
+
     if args.type in ("osci", "all"):
         osci_module = OSCiModule(
             include_time_based=args.osci_time_based,
@@ -33,6 +48,16 @@ def select_modules(args) -> list:
             target_os=args.target_os,
         )
         selected.append(osci_module)
+
+    if args.type in ("oob_osci", "all"):
+        oob_osci_module = OOB_OSCiModule(
+            target_os=args.target_os,
+            evasion_level=args.osci_evasion_level,
+            scan_id=current_scan_id,
+            oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
+            redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+        )
+        selected.append(oob_osci_module)
 
     if args.type == "bruteforce":
         bruteforce_module = BruteforceModule(
@@ -65,6 +90,7 @@ def select_modules(args) -> list:
                 bypass_level=args.ssrf_evasion_level,
             )
         )
+        
     if args.type in ("stored_xss", "all"):
         sxss_categories = getattr(args, "sxss_categories", None) or []
         sxss_target_params = getattr(args, "sxss_target_params", None) or []
@@ -77,12 +103,20 @@ def select_modules(args) -> list:
                 target_params=sxss_target_params if sxss_target_params else None,
             )
         )
+        
     if args.type in ("reflected_xss", "all"):
         selected.append(
             ReflectedXSSModule(
                 evasion_level=args.rxss_evasion_level
             )
         )
+    if args.type in ("ssti", "all"):
+        selected.append(
+            SSTIModule(
+                evasion_level=getattr(args, "ssti_evasion_level", 0),
+                max_payloads=getattr(args, "ssti_max_payloads", None),
+            )
+        )  
 
     if args.type == "oob":
         oast_server = normalize_oast_server_url(getattr(args, "oob_server", "") or "")

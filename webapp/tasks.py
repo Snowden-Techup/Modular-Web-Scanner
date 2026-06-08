@@ -78,6 +78,7 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     ssrf = payload.get("ssrf", {})
     sxss = payload.get("stored_xss", {})
     rxss = payload.get("reflected_xss", {})
+    ssti = payload.get("ssti", {})
     oob = payload.get("oob", {})
 
     level = int(payload.get("level", 1))
@@ -161,6 +162,12 @@ def _build_args_from_payload(payload: dict) -> Namespace:
         sxss_categories=list(sxss.get("categories") or []),
         sxss_target_params=list(sxss.get("target_params") or []),
         rxss_evasion_level=int(rxss.get("evasion_level", 1)),
+        ssti_evasion_level=level,
+        ssti_max_payloads=(
+            int(ssti.get("max_payloads"))
+            if int(ssti.get("max_payloads", 0) or 0) > 0
+            else None
+        ),
         oob_server=normalize_oast_server_url(oob_server_raw),
         oob_retries=int(oob.get("oob_retries", 3)),
         oob_poll_delay=float(oob.get("oob_poll_delay", 5.0)),
@@ -251,6 +258,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         },
     )
     args = _build_args_from_payload(request_payload)
+    args.scan_id = scan_id
     runtime_output = _runtime_scan_report_path(scan_id)
     runtime_output.parent.mkdir(parents=True, exist_ok=True)
     args.output = str(runtime_output)

