@@ -57,6 +57,7 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
 
     print_scan_configuration(
         base_url=base_url,
+        scan_id=getattr(args, "scan_id", "CLI-Local-Scan"),
         surface_count=len(surfaces),
         attack_type=args.type,
         module_count=len(context["modules"]),
@@ -64,6 +65,8 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
         level=args.level,
         target_dbms=args.target_dbms,
         target_os=args.target_os,
+        oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
+        redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
         sqli_evasion_level=args.sqli_evasion_level,
         osci_evasion_level=args.osci_evasion_level,
         lfi_evasion_level=args.lfi_evasion_level,

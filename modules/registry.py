@@ -5,11 +5,13 @@ from modules.bruteforce.module import BruteforceModule
 from modules.lfi.module import LFIModule
 from modules.file_upload.module import FileUploadModule
 from modules.sqli.module import SQLiModule
+from modules.osci.module import OSCiModule
 from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
 from modules.ssti.module import SSTIModule
-
+from modules.oob_sqli.module import OOB_SQLiModule
+from modules.oob_osci.module import OOB_OSCiModule
 
 def get_attack_modules(attack_type: str) -> list[BaseModule]:
     """
@@ -18,6 +20,7 @@ def get_attack_modules(attack_type: str) -> list[BaseModule]:
     """
     factories: dict[str, type[BaseModule]] = {
         "sqli": SQLiModule,
+        "osci": OSCiModule,
         "bruteforce": BruteforceModule,
         "ssrf": SSRFModule,
         "lfi": LFIModule,
@@ -25,6 +28,8 @@ def get_attack_modules(attack_type: str) -> list[BaseModule]:
         "stored_xss": StoredXSSModule,
         "reflected_xss": ReflectedXSSModule,
         "ssti": SSTIModule,
+        "oob_sqli": OOB_SQLiModule,
+        "oob_osci": OOB_OSCiModule,
 
     }
     if attack_type == "all":
