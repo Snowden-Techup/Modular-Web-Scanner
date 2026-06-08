@@ -1580,7 +1580,17 @@
         return;
       }
 
-      scanPhaseLabel.hidden = true;
+      const currentModule = scan.summary?.current_module;
+      const moduleIndex = scan.summary?.module_index;
+      const moduleCount = scan.summary?.module_count;
+      if (currentModule) {
+        scanPhaseLabel.hidden = false;
+        scanPhaseLabel.textContent = moduleCount
+          ? `${currentModule} [${moduleIndex}/${moduleCount}]`
+          : currentModule;
+      } else {
+        scanPhaseLabel.hidden = true;
+      }
       progressStats.classList.remove("is-pre-fuzzing");
 
       const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);

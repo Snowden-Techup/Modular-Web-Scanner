@@ -13,6 +13,17 @@ from modules.reflected_xss.module import ReflectedXSSModule
 from modules.oob.client import DEFAULT_OAST_SERVER_URL, OASTClient, normalize_oast_server_url
 from modules.oob.module import OOBModule
 
+ALL_PIPELINE_MODULE_TYPES = [
+    "sqli",
+    "osci",
+    "lfi",
+    "file_upload",
+    "ssrf",
+    "stored_xss",
+    "reflected_xss",
+]
+
+
 def select_modules(args) -> list:
     selected = []
 

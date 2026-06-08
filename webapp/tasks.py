@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import shutil
 import time
@@ -227,6 +228,258 @@ def _prune_report_archive(max_files: int = SCAN_REPORT_ARCHIVE_MAX_FILES) -> Non
             continue
 
 
+async def _async_run_scan_pipeline(
+    scan_id: str,
+    args,
+    surfaces: list,
+    cookies: dict,
+    started_at: float,
+    runtime_output: Path,
+) -> None:
+    """
+    -t all 전용 순차 파이프라인.
+
+    모듈을 하나씩 실행하고 각 완료 후 중간 리포트를 저장한다.
+    전체 완료 후 최종 합산 리포트를 저장하고 DB를 완료 상태로 갱신한다.
+    """
+    from cli.runner import prepare_scan_context
+    from fuzzer import EngineStats, FuzzerEngine
+    from fuzzer.auth_provider import scan_auth_lifecycle
+    from fuzzer.request_builder import build_and_send_request
+    from fuzzer.setup import ALL_PIPELINE_MODULE_TYPES, estimate_total_requests, select_modules
+    from reporter import ReportGenerator
+    from reporter.dedupe import full_report_path
+
+    # ── 1. 전체 예상 요청 수 사전 계산 (진행바 분모) ─────────────────────────
+    module_totals: dict[str, int] = {}
+    for mtype in ALL_PIPELINE_MODULE_TYPES:
+        mod_args = copy.copy(args)
+        mod_args.type = mtype
+        mods = select_modules(mod_args)
+        if mods:
+            module_totals[mtype] = estimate_total_requests(surfaces, mods)
+    overall_total = max(1, sum(module_totals.values()))
+    n_modules = len([t for t in ALL_PIPELINE_MODULE_TYPES if module_totals.get(t, 0) > 0])
+
+    await _scan_update(
+        scan_id,
+        total_requests=overall_total,
+        progress=0,
+        progress_percent=0.0,
+        summary={
+            "phase": "fuzzing",
+            "current_module": "",
+            "module_index": 0,
+            "module_count": n_modules,
+            "queued": 0,
+            "completed": 0,
+            "failures": 0,
+            "findings": 0,
+            "elapsed_time": round(time.monotonic() - started_at, 2),
+            "total_requests": overall_total,
+            "planned_requests": overall_total,
+        },
+    )
+
+    async def _request_sender(session, surface, parameter, payload, allow_redirects=True):
+        return await build_and_send_request(session, surface, parameter, payload, allow_redirects=allow_redirects)
+
+    # ── 2. 모듈별 순차 실행 ───────────────────────────────────────────────────
+    all_findings: list = []
+    merged_stats = EngineStats(queued=0, completed=0, failures=0, findings=0)
+    cumulative_completed = 0
+    cumulative_findings = 0
+    last_shown_progress = 0.0
+    last_logged_progress = -1.0
+    last_db_sync_at = 0.0
+    module_run_idx = 0
+
+    async with scan_auth_lifecycle(args, base_cookies=cookies):
+        for module_type in ALL_PIPELINE_MODULE_TYPES:
+            if module_totals.get(module_type, 0) == 0:
+                continue
+
+            module_run_idx += 1
+            mod_args = copy.copy(args)
+            mod_args.type = module_type
+
+            context = prepare_scan_context(mod_args, surfaces)
+            if context is None:
+                await _scan_log(scan_id, f"[Pipeline] {module_type}: 컨텍스트 준비 실패, 건너뜀")
+                continue
+
+            module_total = context["total_requests"]
+            await _scan_log(
+                scan_id,
+                f"[Pipeline {module_run_idx}/{n_modules}] {module_type} 시작 "
+                f"(예상 {module_total}건)",
+            )
+            await _scan_update(
+                scan_id,
+                summary={
+                    "phase": "fuzzing",
+                    "current_module": module_type,
+                    "module_index": module_run_idx,
+                    "module_count": n_modules,
+                    "queued": overall_total,
+                    "completed": cumulative_completed,
+                    "failures": merged_stats.failures,
+                    "findings": cumulative_findings,
+                    "elapsed_time": round(time.monotonic() - started_at, 2),
+                    "total_requests": overall_total,
+                    "planned_requests": overall_total,
+                },
+            )
+
+            engine = FuzzerEngine(
+                max_concurrent_requests=context["concurrency"],
+                worker_count=context["queue_workers"],
+                modules=context["modules"],
+                concurrency_per_module=context["queue_workers"],
+                session_pool_size=max(1, args.session_pool_size),
+                delay=context["delay"],
+            )
+
+            scan_task = asyncio.create_task(
+                engine.run_with_attack_modules(surfaces=surfaces, request_sender=_request_sender)
+            )
+
+            while not scan_task.done():
+                current_completed = cumulative_completed + engine.stats.completed
+                raw_pct = min(100.0, round(current_completed / overall_total * 100, 1))
+                if not scan_task.done() and raw_pct >= 99.9:
+                    raw_pct = 99.9
+                progress_pct = max(last_shown_progress, raw_pct)
+                last_shown_progress = progress_pct
+
+                summary = {
+                    "phase": "fuzzing",
+                    "current_module": module_type,
+                    "module_index": module_run_idx,
+                    "module_count": n_modules,
+                    "queued": overall_total,
+                    "completed": current_completed,
+                    "failures": merged_stats.failures + engine.stats.failures,
+                    "findings": cumulative_findings + engine.stats.findings,
+                    "elapsed_time": round(time.monotonic() - started_at, 2),
+                    "total_requests": overall_total,
+                    "planned_requests": overall_total,
+                }
+
+                now = time.monotonic()
+                progress_changed = progress_pct != last_logged_progress
+                if progress_changed or (now - last_db_sync_at) >= PROGRESS_DB_SYNC_INTERVAL:
+                    await _scan_update(
+                        scan_id,
+                        progress_percent=progress_pct,
+                        progress=int(progress_pct),
+                        summary=summary,
+                    )
+                    last_db_sync_at = now
+
+                if progress_changed:
+                    await _scan_log(
+                        scan_id,
+                        f"[{module_type}] 진행률 {progress_pct}% "
+                        f"(completed={engine.stats.completed}, findings={engine.stats.findings})",
+                    )
+                    last_logged_progress = progress_pct
+
+                await asyncio.sleep(0.3)
+
+            stats = await scan_task
+
+            # 모듈별 중간 리포트 저장
+            module_output = runtime_output.with_name(
+                f"{runtime_output.stem}_{module_type}{runtime_output.suffix}"
+            )
+            module_reporter = ReportGenerator(stats=stats, findings=engine.findings)
+            await asyncio.to_thread(module_reporter.export_to_json, str(module_output))
+            await _scan_log(
+                scan_id,
+                f"[Pipeline {module_run_idx}/{n_modules}] {module_type} 완료 "
+                f"(findings={stats.findings}, report={module_output.name})",
+            )
+
+            all_findings.extend(engine.findings)
+            cumulative_completed += stats.completed
+            cumulative_findings += stats.findings
+            merged_stats.queued += stats.queued
+            merged_stats.completed += stats.completed
+            merged_stats.failures += stats.failures
+            merged_stats.findings += stats.findings
+
+    # ── 3. 최종 합산 리포트 저장 ──────────────────────────────────────────────
+    final_reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
+    await asyncio.to_thread(final_reporter.export_to_json, args.output)
+    await _scan_log(scan_id, f"[Pipeline] 최종 합산 리포트 저장: {args.output}")
+
+    archived_output = _archive_scan_report_path(scan_id)
+    archived_output.parent.mkdir(parents=True, exist_ok=True)
+    runtime_full = full_report_path(runtime_output)
+    debug_output = Path("scan_report.json")
+    debug_full = full_report_path(debug_output)
+
+    try:
+        await asyncio.to_thread(shutil.copy2, runtime_output, archived_output)
+        await asyncio.to_thread(_prune_report_archive)
+    except OSError as exc:
+        await _scan_log(scan_id, f"report 디렉터리 저장 실패: {exc}")
+
+    try:
+        await asyncio.to_thread(shutil.copy2, runtime_output, debug_output)
+        if runtime_full.exists():
+            await asyncio.to_thread(shutil.copy2, runtime_full, debug_full)
+    except OSError as exc:
+        await _scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
+
+    report_json = None
+    try:
+        def _load_report() -> dict:
+            with open(archived_output, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        report_json = await asyncio.to_thread(_load_report)
+    except (OSError, json.JSONDecodeError) as exc:
+        await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
+
+    findings = _serialize_findings(all_findings)
+    final_total = max(overall_total, merged_stats.queued, merged_stats.completed, 1)
+    await _scan_update(
+        scan_id,
+        status="completed",
+        progress=100,
+        progress_percent=100.0,
+        summary={
+            "phase": "completed",
+            "module_count": n_modules,
+            "queued": merged_stats.queued,
+            "completed": merged_stats.completed,
+            "failures": merged_stats.failures,
+            "findings": merged_stats.findings,
+            "elapsed_time": round(time.monotonic() - started_at, 2),
+            "total_requests": final_total,
+            "planned_requests": overall_total,
+        },
+        result={
+            "summary": {
+                "target": args.url,
+                "scan_type": args.type,
+                "total_requests": merged_stats.completed,
+                "findings": len(findings),
+                "output": str(archived_output),
+            }
+        },
+        report_json=report_json,
+        error=None,
+    )
+
+    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
+    if scan_pk is not None:
+        await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
+
+    await _scan_log(scan_id, "[Celery/Pipeline] 스캔 완료")
+
+
 async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     """실제 asyncio 스캔 엔진 실행 (Celery 워커에서 호출)"""
     from cli.options import parse_cookies
@@ -284,6 +537,11 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     if not surfaces:
         raise RuntimeError("No attack surfaces resolved from target.")
     await _scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
+
+    # -t all: 모듈 순차 파이프라인 실행
+    if args.type == "all":
+        await _async_run_scan_pipeline(scan_id, args, surfaces, cookies, started_at, runtime_output)
+        return
 
     context = prepare_scan_context(args, surfaces)
     if context is None:
