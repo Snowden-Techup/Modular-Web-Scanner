@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import aiohttp
 
 from cli.output import print_scan_configuration, progress_printer
-from fuzzer import FuzzerEngine
+from fuzzer import FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
-from fuzzer.request_builder import build_and_send_request
+from fuzzer.request_builder import build_and_send_request, FuzzerResponse
 from fuzzer.setup import count_module_payloads, estimate_total_requests, select_modules
 from reporter import ReportGenerator
-
+from core.models import Payload 
 
 def prepare_scan_context(args, surfaces):
     if args.type == "stored_xss":
@@ -47,6 +48,89 @@ def prepare_scan_context(args, surfaces):
         "queue_workers": queue_workers,
         "total_requests": total_requests,
     }
+
+async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
+    """
+    모든 스캔이 종료된 후, OOB 모듈들이 발급했던 토큰을 모아
+    콜백 서버에 결과를 폴링. (URL Too Long 방지를 위해 청크 분할 전송)
+    """
+    oob_findings = []
+    
+    # 1. 모든 OOB 모듈에서 생성했던 CLI용 토큰들을 수집
+    tokens_to_poll = []
+    token_map = {}
+    for module in modules:
+        if hasattr(module, "generated_tokens") and module.generated_tokens:
+            for item in module.generated_tokens:
+                tokens_to_poll.append(item["token"])
+                token_map[item["token"]] = item
+
+    if not tokens_to_poll:
+        return oob_findings
+
+    print("\n[*] Waiting 10 seconds for delayed OOB callbacks...")
+    await asyncio.sleep(10.0)
+    
+    # 콜백 서버 폴링 API 주소
+    api_url = f"http://{oob_domain}:8001/api/poll"
+    
+    # URL Too Long (414/400) 에러를 막기 위해 최대 500개씩 청크 분할
+    CHUNK_SIZE = 500
+    token_chunks = [tokens_to_poll[i:i + CHUNK_SIZE] for i in range(0, len(tokens_to_poll), CHUNK_SIZE)]
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            for i, chunk in enumerate(token_chunks):
+                # 2. API 호출 (청크 단위로 발송)
+                params = {"tokens": ",".join(chunk)}
+                
+                async with session.get(api_url, params=params, timeout=10.0) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        hits = data.get("hits", [])
+                        
+                        # 3. 받아온 결과를 스캐너의 Finding 객체로 변환
+                        for hit in hits:
+                            hit_token = hit.get("token")
+                            if hit_token in token_map:
+                                matched_info = token_map[hit_token]
+                                target_url = matched_info.get("target", {}).get("url", "Unknown URL")
+                                param_name = matched_info.get("target", {}).get("parameter", "Unknown")
+                                protocol = hit.get("protocol", "Unknown")
+                                client_ip = hit.get("source_ip", "Unknown")
+                                
+                                print(f"[+] [OOB Hit] Vulnerability Verified on {target_url} (Param: {param_name}) via {protocol}")
+                                dummy_response = FuzzerResponse(
+                                    status=0, text="", headers={}, elapsed_time=0.0, url=target_url, error="OOB Callback (No Response)"
+                                )
+
+                                attack_info = matched_info.get("attack_info", {})
+
+                                reconstructed_payload = Payload(
+                                    value=attack_info.get("payload_value", ""),
+                                    attack_type=attack_info.get("type", "OOB"),
+                                    risk_level=attack_info.get("risk_level", "High")
+                                )
+
+                                oob_findings.append(Finding(
+                                    surface=matched_info["surface_obj"],
+                                    parameter=param_name,
+                                    payload=reconstructed_payload,
+                                    response=dummy_response,
+                                    module_name=matched_info.get("module_name", "OOB Module"),
+                                    evidences=[f"[Verified] OOB Execution detected via {protocol} from Target IP: {client_ip}"]
+                                ))
+                    else:
+                        print(f"[-] OOB Polling failed for chunk {i+1} with status {res.status}")
+                        
+                # 서버 부하 방지를 위해 청크 간 짧은 대기
+                if i < len(token_chunks) - 1:
+                    await asyncio.sleep(0.5)
+
+    except Exception as e:
+        print(f"[-] OOB Polling Network Error: {e}")
+        
+    return oob_findings
 
 
 async def run_scan(args, *, base_url: str, surfaces) -> None:
@@ -105,7 +189,17 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
         stats = await scan_task
         await progress_task
 
-    reporter = ReportGenerator(stats=stats, findings=engine.findings)
+    # 스캔 완료 직후 리포트 생성 전에 OOB 폴링 수행
+    oob_domain = getattr(args, "oob_domain", "oob.snowden.kr")
+    oob_findings = await poll_oob_results(context["modules"], oob_domain)
+
+    final_findings = engine.findings
+    
+    if oob_findings:
+        final_findings.extend(oob_findings)
+        stats.findings += len(oob_findings)
+
+    reporter = ReportGenerator(stats=stats, findings=final_findings)
     reporter.print_cli_report()
     reporter.export_to_json(args.output)
 
