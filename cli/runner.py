@@ -5,8 +5,7 @@ import os
 
 from cli.output import print_scan_configuration, progress_printer
 from fuzzer import FuzzerEngine
-from cli.options import parse_cookies
-from fuzzer.auth_provider import scan_auth_lifecycle
+from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request
 from fuzzer.setup import count_module_payloads, estimate_total_requests, select_modules
 from reporter import ReportGenerator
@@ -92,8 +91,8 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
         delay=context["delay"],
     )
 
-    scan_cookies = parse_cookies(args.cookie) if getattr(args, "cookie", "") else {}
-    async with scan_auth_lifecycle(args, base_cookies=scan_cookies):
+    scan_cookies = merge_scan_cookies(args, surfaces)
+    async with scan_auth_lifecycle(args, base_cookies=scan_cookies, surfaces=surfaces):
         scan_task = asyncio.create_task(
             engine.run_with_attack_modules(
                 surfaces=surfaces,

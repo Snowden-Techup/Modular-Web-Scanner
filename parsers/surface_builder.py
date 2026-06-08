@@ -263,10 +263,19 @@ class SurfaceBuilder:
         if method == HttpMethod.GET:
             return ParamLocation.QUERY
 
+        if form.get("is_file_upload"):
+            return ParamLocation.BODY_FORM
+
         content_type = str(form.get("data_content_type", "")).lower()
+        if "multipart/form-data" in content_type:
+            return ParamLocation.BODY_FORM
         if _is_json_content_type(content_type):
             return ParamLocation.BODY_JSON
         if _is_form_content_type(content_type):
+            return ParamLocation.BODY_FORM
+
+        enctype = str(form.get("enctype", "")).lower()
+        if "multipart" in enctype:
             return ParamLocation.BODY_FORM
 
         has_spa_metadata = bool(form.get("data_orig_method") or content_type)
@@ -368,6 +377,14 @@ class SurfaceBuilder:
             if not response_headers and response_content_type:
                 response_headers = {"content-type": response_content_type}
 
+            request_content_type = str(form.get("data_content_type") or "").strip()
+            if form.get("is_file_upload") and not request_content_type:
+                request_content_type = "multipart/form-data"
+            raw_file_names = form.get("file_field_names") or []
+            file_field_names = tuple(
+                str(name).strip() for name in raw_file_names if str(name).strip()
+            )
+
             surfaces.append(AttackSurface(
                 url=safe_url,
                 method=method,
@@ -381,6 +398,8 @@ class SurfaceBuilder:
                 description=desc,
                 depth=depth_hint or getattr(page_data, "depth", 0) or 0,
                 content_type=response_content_type or None,
+                request_content_type=request_content_type or None,
+                file_field_names=file_field_names,
                 graphql_arg_types=gql_arg_types,
                 parameter_confidence=confidence,
             ))

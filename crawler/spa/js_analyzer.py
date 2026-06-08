@@ -10,7 +10,9 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from crawler.spa.capture import is_in_scope, record_api_candidate
+from crawler.spa.capture_core import path_key_from_url, register_observed_body_field_hints
 from parsers.http_method_inference import infer_http_method_from_path
+from parsers.body_field_inference import extract_body_field_names_near_url_literal
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +162,7 @@ def _infer_content_type(method: str, url: str) -> str:
 def _content_type_for_wrapper(wrapper: str) -> str:
     w = str(wrapper or "").lower()
     if w == "postform":
-        return "application/x-www-form-urlencoded"
+        return "multipart/form-data"
     if w in ("post", "put", "patch", "delete", "del"):
         return "application/json"
     return ""
@@ -352,6 +354,14 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
             )
             if created:
                 added += 1
+            if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+                near_fields = extract_body_field_names_near_url_literal(script_text, endpoint_url)
+                if near_fields:
+                    register_observed_body_field_hints(
+                        engine,
+                        path_key_from_url(urljoin(base_url, endpoint_url)),
+                        near_fields,
+                    )
         engine.metrics["js_scripts_scanned"] += 1
 
     timeout_ms = int(getattr(engine, "route_timeout", 5000) or 5000)
@@ -378,6 +388,14 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
             )
             if created:
                 added += 1
+            if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+                near_fields = extract_body_field_names_near_url_literal(script_text, endpoint_url)
+                if near_fields:
+                    register_observed_body_field_hints(
+                        engine,
+                        path_key_from_url(urljoin(script_url, endpoint_url)),
+                        near_fields,
+                    )
         engine.metrics["js_scripts_scanned"] += 1
 
     engine.metrics["js_endpoints_seeded"] += added
