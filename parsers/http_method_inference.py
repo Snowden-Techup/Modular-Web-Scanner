@@ -20,6 +20,8 @@ _POST_ACTION_SEGMENTS = frozenset({
     "register",
     "logout",
     "confirm",
+    "process",
+    "form",
 })
 
 _DEFAULT_PLACEHOLDER = ""
@@ -36,8 +38,6 @@ def infer_http_method_from_path(url: str) -> str:
         return "GET"
     last = segments[-1]
     if last in _POST_ACTION_SEGMENTS:
-        return "POST"
-    if len(segments) >= 2 and segments[-2] in ("checkout", "board") and last in ("form", "write"):
         return "POST"
     return "GET"
 

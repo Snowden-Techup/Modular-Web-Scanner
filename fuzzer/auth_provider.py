@@ -184,6 +184,37 @@ class ScanAuthProvider:
         self._cookies.update(self._session_manager.get_cookies())
 
 
+def collect_cookies_from_surfaces(surfaces: Any) -> dict[str, str]:
+    """크롤 surface에 실린 세션 쿠키를 퍼징 단계에 전달."""
+    merged: dict[str, str] = {}
+    if not surfaces:
+        return merged
+    for surface in surfaces:
+        raw = getattr(surface, "cookies", None) or {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if value is None:
+                    continue
+                key_str = str(key).strip()
+                if key_str:
+                    merged[key_str] = str(value)
+    return merged
+
+
+def merge_scan_cookies(args: Any, surfaces: Any = None) -> dict[str, str]:
+    """CLI --cookie 와 크롤 surface 쿠키를 합친다 (surface 값 우선)."""
+    from cli.options import parse_cookies
+
+    cookies = parse_cookies(getattr(args, "cookie", "") or "")
+    for key, value in collect_cookies_from_surfaces(surfaces).items():
+        cookies[key] = value
+    return cookies
+
+
+def _has_session_cookie(cookies: dict[str, str]) -> bool:
+    return any(_is_auth_cookie_name(name) for name in cookies)
+
+
 def parse_local_storage_arg(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
@@ -203,6 +234,7 @@ async def create_scan_auth_provider(
     args: Any,
     *,
     base_cookies: dict[str, str] | None = None,
+    surfaces: Any = None,
 ) -> ScanAuthProvider | None:
     """
     CLI/Web 인자로부터 퍼징용 AuthProvider 생성.
@@ -215,6 +247,11 @@ async def create_scan_auth_provider(
     auth_cookies = dict(base_cookies or {})
     for name, value in build_auth_cookies_from_storage(local_storage).items():
         auth_cookies.setdefault(name, value)
+    for name, value in collect_cookies_from_surfaces(surfaces).items():
+        auth_cookies[name] = value
+
+    crawl_mode = str(getattr(args, "crawl_mode", "hybrid") or "hybrid").lower()
+    has_crawl_session = _has_session_cookie(auth_cookies)
 
     login_url = (getattr(args, "login_url", "") or "").strip()
     username = (getattr(args, "username", "") or "").strip()
@@ -247,10 +284,16 @@ async def create_scan_auth_provider(
                 auth_cookies.update(sm.get_cookies())
                 print(f"[*] [Auth] fuzz-phase login succeeded: {login_url}")
             else:
-                print(
-                    f"[!] [Auth] fuzz-phase login failed: {login_url} "
-                    f"(refresh disabled; using static tokens only if any)"
-                )
+                if crawl_mode == "dynamic" and has_crawl_session:
+                    print(
+                        f"[*] [Auth] fuzz-phase login failed for {login_url}; "
+                        f"using crawl session cookie(s) from attack surfaces."
+                    )
+                else:
+                    print(
+                        f"[!] [Auth] fuzz-phase login failed: {login_url} "
+                        f"(refresh disabled; using static tokens only if any)"
+                    )
                 await sm.close()
         except Exception as exc:
             print(f"[!] [Auth] fuzz-phase login error: {exc}")
@@ -287,13 +330,18 @@ async def scan_auth_lifecycle(
     args: Any,
     *,
     base_cookies: dict[str, str] | None = None,
+    surfaces: Any = None,
 ) -> AsyncIterator[ScanAuthProvider | None]:
     """
     CLI·Web 공통: provider 생성 → set_auth_provider → finally 정리.
     """
     from fuzzer.request_builder import set_auth_provider
 
-    provider = await create_scan_auth_provider(args, base_cookies=base_cookies)
+    provider = await create_scan_auth_provider(
+        args,
+        base_cookies=base_cookies,
+        surfaces=surfaces,
+    )
     set_auth_provider(provider)
     try:
         yield provider

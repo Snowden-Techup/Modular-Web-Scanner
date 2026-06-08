@@ -15,6 +15,7 @@ import aiohttp
 from core.models import AttackSurface, ParamLocation
 
 from fuzzer.auth_provider import ScanAuthProvider
+from modules.file_upload.form_helpers import fill_upload_form_defaults
 
 _DYNAMIC_TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
 _auth_provider: ScanAuthProvider | None = None
@@ -515,6 +516,89 @@ def _is_file_payload(payload: Any) -> bool:
     )
 
 
+_FILE_PARAM_HINTS = frozenset(
+    {
+        "attachment",
+        "attachments",
+        "file",
+        "files",
+        "uploaded",
+        "uploadfile",
+        "userfile",
+        "image",
+        "images",
+        "document",
+        "avatar",
+        "binary",
+        "blob",
+    }
+)
+
+_UPLOAD_URL_HINTS = ("upload", "attach", "attachment", "file", "media", "avatar")
+
+
+def _surface_file_field_names(surface: AttackSurface) -> frozenset[str]:
+    raw = getattr(surface, "file_field_names", None) or ()
+    return frozenset(str(name).strip() for name in raw if str(name).strip())
+
+
+def _parameter_looks_like_file_field(parameter: str) -> bool:
+    key = str(parameter or "").strip().lower()
+    if not key:
+        return False
+    if key in _FILE_PARAM_HINTS:
+        return True
+    return any(hint in key for hint in _FILE_PARAM_HINTS)
+
+
+def _surface_suggests_file_upload(surface: AttackSurface) -> bool:
+    blob = f"{surface.url} {getattr(surface, 'source_url', '') or ''}".lower()
+    return any(hint in blob for hint in _UPLOAD_URL_HINTS)
+
+
+def _should_use_multipart_upload(
+    surface: AttackSurface,
+    parameter: str,
+    *,
+    is_file_payload: bool,
+) -> bool:
+    """SPA API surfaces may be BODY_JSON while the live client sends multipart."""
+    if not is_file_payload:
+        return False
+    if surface.param_location == ParamLocation.BODY_FORM:
+        return True
+    if surface.param_location != ParamLocation.BODY_JSON:
+        return False
+    req_ct = str(getattr(surface, "request_content_type", "") or "").lower()
+    if "multipart/form-data" in req_ct:
+        return True
+    file_fields = _surface_file_field_names(surface)
+    if file_fields:
+        return parameter in file_fields or _parameter_looks_like_file_field(parameter)
+    return _parameter_looks_like_file_field(parameter) or _surface_suggests_file_upload(surface)
+
+
+def _build_multipart_request_kwargs(
+    req_params: dict[str, Any],
+    *,
+    parameter: str,
+    payload: Any,
+) -> dict[str, Any]:
+    fill_upload_form_defaults(req_params, parameter)
+    form = aiohttp.FormData()
+    for key, value in req_params.items():
+        if key == parameter:
+            continue
+        form.add_field(str(key), str(value))
+    form.add_field(
+        parameter,
+        payload.content,
+        filename=str(payload.filename),
+        content_type=str(payload.content_type),
+    )
+    return {"data": form}
+
+
 def _inject_path_payload(url: str, parameter: str, payload: str) -> str:
     """
     Replace a path placeholder with encoded payload.
@@ -577,6 +661,9 @@ async def build_and_send_request(
     request_kwargs: dict[str, Any] = {}
     payload_value = _resolve_payload_value(payload)
     is_file_payload = _is_file_payload(payload)
+    use_multipart_upload = _should_use_multipart_upload(
+        surface, parameter, is_file_payload=is_file_payload
+    )
     is_lfi_payload = type(payload).__name__ == "LFIPayload"
     headers = _sanitize_headers_for_request(headers)
 
@@ -585,19 +672,12 @@ async def build_and_send_request(
         if not is_lfi_payload:
             request_kwargs["params"] = req_params
     elif surface.param_location == ParamLocation.BODY_FORM:
-        if is_file_payload:
-            form = aiohttp.FormData()
-            for key, value in req_params.items():
-                if key == parameter:
-                    continue
-                form.add_field(str(key), str(value))
-            form.add_field(
-                parameter,
-                payload.content,
-                filename=str(payload.filename),
-                content_type=str(payload.content_type),
+        if use_multipart_upload:
+            request_kwargs.update(
+                _build_multipart_request_kwargs(
+                    req_params, parameter=parameter, payload=payload
+                )
             )
-            request_kwargs["data"] = form
         else:
             req_params[parameter] = payload_value
             _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
@@ -605,27 +685,38 @@ async def build_and_send_request(
 
     #  JSON 및 GraphQL 직렬화 + Safe Mode 방어 (일반 요청)
     elif surface.param_location == ParamLocation.BODY_JSON:
-        req_params[parameter] = payload_value
-        _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
+        if use_multipart_upload:
+            _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
+            request_kwargs.update(
+                _build_multipart_request_kwargs(
+                    req_params, parameter=parameter, payload=payload
+                )
+            )
+        else:
+            req_params[parameter] = payload_value
+            _hydrate_empty_supporting_params(req_params, attack_parameter=parameter)
 
         gql_meta = _parse_graphql_surface(surface)
-        if gql_meta is not None:
-            gql_type, op_name = gql_meta
-            if _should_skip_graphql_mutation(gql_type):
-                print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
-                return FuzzerResponse(
-                    status=0, text="", headers={}, elapsed_time=0.0, url=url,
-                    error="Skipped by Safe Mode (GraphQL Mutation)"
+        if use_multipart_upload:
+            gql_meta = None
+        if not use_multipart_upload:
+            if gql_meta is not None:
+                gql_type, op_name = gql_meta
+                if _should_skip_graphql_mutation(gql_type):
+                    print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
+                    return FuzzerResponse(
+                        status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                        error="Skipped by Safe Mode (GraphQL Mutation)"
+                    )
+                query_str = _build_graphql_operation_query(
+                    gql_type, op_name, req_params,
+                    attack_parameter=parameter,
+                    attack_value=payload_value,
+                    arg_types=getattr(surface, "graphql_arg_types", None) or {},
                 )
-            query_str = _build_graphql_operation_query(
-                gql_type, op_name, req_params,
-                attack_parameter=parameter,
-                attack_value=payload_value,
-                arg_types=getattr(surface, "graphql_arg_types", None) or {},
-            )
-            request_kwargs["json"] = {"query": query_str}
-        else:
-            request_kwargs["json"] = req_params
+                request_kwargs["json"] = {"query": query_str}
+            else:
+                request_kwargs["json"] = req_params
 
     elif surface.param_location == ParamLocation.HEADER:
         headers[parameter] = payload_value
@@ -688,42 +779,42 @@ async def build_and_send_request(
             if not is_lfi_payload:
                 request_kwargs["params"] = req_params
         elif surface.param_location == ParamLocation.BODY_FORM:
-            if is_file_payload:
-                form = aiohttp.FormData()
-                for key, value in req_params.items():
-                    if key == parameter:
-                        continue
-                    form.add_field(str(key), str(value))
-                form.add_field(
-                    parameter,
-                    payload.content,
-                    filename=str(payload.filename),
-                    content_type=str(payload.content_type),
+            if use_multipart_upload:
+                request_kwargs.update(
+                    _build_multipart_request_kwargs(
+                        req_params, parameter=parameter, payload=payload
+                    )
                 )
-                request_kwargs["data"] = form
             else:
                 request_kwargs["data"] = req_params
 
         #  JSON 및 GraphQL 직렬화 + Safe Mode 방어 (Dynamic Token이 있는 경우)
         elif surface.param_location == ParamLocation.BODY_JSON:
-            gql_meta = _parse_graphql_surface(surface)
-            if gql_meta is not None:
-                gql_type, op_name = gql_meta
-                if _should_skip_graphql_mutation(gql_type):
-                    print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
-                    return FuzzerResponse(
-                        status=0, text="", headers={}, elapsed_time=0.0, url=url,
-                        error="Skipped by Safe Mode (GraphQL Mutation)"
+            if use_multipart_upload:
+                request_kwargs.update(
+                    _build_multipart_request_kwargs(
+                        req_params, parameter=parameter, payload=payload
                     )
-                query_str = _build_graphql_operation_query(
-                    gql_type, op_name, req_params,
-                    attack_parameter=parameter,
-                    attack_value=payload_value,
-                    arg_types=getattr(surface, "graphql_arg_types", None) or {},
                 )
-                request_kwargs["json"] = {"query": query_str}
             else:
-                request_kwargs["json"] = req_params
+                gql_meta = _parse_graphql_surface(surface)
+                if gql_meta is not None:
+                    gql_type, op_name = gql_meta
+                    if _should_skip_graphql_mutation(gql_type):
+                        print(f"[Safe Mode] 스킵된 GraphQL Mutation: {op_name} (URL: {url})")
+                        return FuzzerResponse(
+                            status=0, text="", headers={}, elapsed_time=0.0, url=url,
+                            error="Skipped by Safe Mode (GraphQL Mutation)"
+                        )
+                    query_str = _build_graphql_operation_query(
+                        gql_type, op_name, req_params,
+                        attack_parameter=parameter,
+                        attack_value=payload_value,
+                        arg_types=getattr(surface, "graphql_arg_types", None) or {},
+                    )
+                    request_kwargs["json"] = {"query": query_str}
+                else:
+                    request_kwargs["json"] = req_params
 
         elif req_params:
             request_kwargs["params"] = req_params

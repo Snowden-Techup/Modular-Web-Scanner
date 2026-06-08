@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 from playwright.async_api import async_playwright
 
 from core.models import PageData
+from crawler.spa.dom_form_capture import capture_and_register_dom_fields
 from crawler.spa.browser import (
     build_auth_headers,
     build_playwright_cookies,
@@ -330,6 +331,7 @@ class SPACrawlerEngine:
                     self.current_route_depth = 0
                     self.route_depths[self.target_url] = 0
                     await wait_for_page_settle(page, context_label="base route load")
+                    await capture_and_register_dom_fields(self, page)
                     final_html = await page.content()
                 except Exception as e:
                     logger.debug("[SPA Crawler] Load timeout on base url: %s", e)
@@ -393,6 +395,7 @@ class SPACrawlerEngine:
                             timeout=self.route_timeout,
                         )
                         await wait_for_page_settle(page, context_label=f"route load:{route}")
+                        await capture_and_register_dom_fields(self, page)
                         await interact_and_submit(self, page)
                         await interact_and_submit(self, page)
                         await sync_storage_from_browser(self, page)

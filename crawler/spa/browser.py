@@ -446,73 +446,92 @@ async def playwright_json_login(engine, page, context) -> bool:
     pre_login_cookie_names = set(cookies_as_dict(engine.cookies).keys())
     login_data = SessionManager.build_login_payload(cfg)
     login_post_data = json.dumps(login_data, ensure_ascii=False)
-    try:
-        resp = await context.request.post(
-            cfg.login_url,
-            data=login_post_data,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-        json_body = None
+
+    from parsers.login_url_inference import iter_login_post_urls
+
+    for post_url in iter_login_post_urls(cfg.login_url):
         try:
-            json_body = await resp.json()
-        except Exception as exc:
-            logger.debug("[SPA Crawler] JSON login response was not JSON on %s: %s", cfg.login_url, exc)
+            resp = await context.request.post(
+                post_url,
+                data=login_post_data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            json_body = None
+            try:
+                json_body = await resp.json()
+            except Exception as exc:
+                logger.debug(
+                    "[SPA Crawler] JSON login response was not JSON on %s: %s",
+                    post_url,
+                    exc,
+                )
 
-        engine.record_seeded_api(
-            method="POST",
-            url=cfg.login_url,
-            post_data=login_post_data,
-            req_content_type="application/json",
-            status=resp.status,
-            content_type=resp.headers.get("content-type", ""),
-            source="auth-login-json",
-        )
-
-        engine.cookies = merge_playwright_cookies(
-            engine.cookies,
-            filter_cookies_for_target(engine, await context.cookies()),
-        )
-        for key, value in SessionManager.json_auth_for_local_storage(json_body).items():
-            engine.local_storage[key] = value
-        if engine.local_storage:
-            await page.evaluate(
-                """(items) => {
-                    for (const [k, v] of Object.entries(items || {})) {
-                        if (k != null && v != null) localStorage.setItem(String(k), String(v));
-                    }
-                }""",
-                dict(engine.local_storage),
+            engine.record_seeded_api(
+                method="POST",
+                url=post_url,
+                post_data=login_post_data,
+                req_content_type="application/json",
+                status=resp.status,
+                content_type=resp.headers.get("content-type", ""),
+                source="auth-login-json",
             )
 
-        await wait_for_page_settle(page, context_label="json login token apply")
-        await sync_storage_from_browser(engine, page)
-        engine.cookies = merge_playwright_cookies(
-            engine.cookies,
-            filter_cookies_for_target(engine, await context.cookies()),
-        )
+            if resp.status in (404, 405, 415):
+                logger.debug(
+                    "[SPA Crawler] JSON login skipped for %s (status=%s)",
+                    post_url,
+                    resp.status,
+                )
+                continue
 
-        if SessionManager._json_login_failed(json_body):
-            return False
-        if not (SessionManager._json_login_succeeded(json_body) or resp.ok):
-            return False
+            engine.cookies = merge_playwright_cookies(
+                engine.cookies,
+                filter_cookies_for_target(engine, await context.cookies()),
+            )
+            for key, value in SessionManager.json_auth_for_local_storage(json_body).items():
+                engine.local_storage[key] = value
+            if engine.local_storage:
+                await page.evaluate(
+                    """(items) => {
+                        for (const [k, v] of Object.entries(items || {})) {
+                            if (k != null && v != null) localStorage.setItem(String(k), String(v));
+                        }
+                    }""",
+                    dict(engine.local_storage),
+                )
 
-        if await verify_login_success(
-            page, cfg,
-            local_storage=engine.local_storage,
-            cookies=engine.cookies,
-            pre_login_cookie_names=pre_login_cookie_names,
-        ):
-            engine._login_verified = True
-            logger.info("[SPA Crawler] Playwright JSON login succeeded: %s", cfg.login_url)
-            return True
-        logger.warning("[SPA Crawler] Playwright JSON login not verified (2-of-3): %s", cfg.login_url)
-        return False
-    except Exception as e:
-        logger.warning("[SPA Crawler] Playwright JSON login failed on %s: %s", cfg.login_url, e)
-        return False
+            await wait_for_page_settle(page, context_label="json login token apply")
+            await sync_storage_from_browser(engine, page)
+            engine.cookies = merge_playwright_cookies(
+                engine.cookies,
+                filter_cookies_for_target(engine, await context.cookies()),
+            )
+
+            if SessionManager._json_login_failed(json_body):
+                continue
+            if not (SessionManager._json_login_succeeded(json_body) or resp.ok):
+                continue
+
+            if await verify_login_success(
+                page,
+                cfg,
+                local_storage=engine.local_storage,
+                cookies=engine.cookies,
+                pre_login_cookie_names=pre_login_cookie_names,
+            ):
+                engine._login_verified = True
+                logger.info("[SPA Crawler] Playwright JSON login succeeded: %s", post_url)
+                return True
+            logger.debug(
+                "[SPA Crawler] Playwright JSON login not verified on %s",
+                post_url,
+            )
+        except Exception as e:
+            logger.debug("[SPA Crawler] Playwright JSON login failed on %s: %s", post_url, e)
+    return False
 
 
 async def playwright_auth_login(engine, page, context) -> bool:

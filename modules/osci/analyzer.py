@@ -154,25 +154,6 @@ async def verify_osci_logic(response, payload, original_res, requester, is_hit, 
 
     # [B] 시간 지연 경계값 재검증 비활성화
     if "[Time]" in str(evidences):
-        """
-        time_match = re.search(r'delayed: ([\d.]+)s', str(evidences))
-        if time_match:
-            delay_time = float(time_match.group(1))
-            
-            # 4~5초 사이 경계값인 경우 재검증
-            if 3.0 < delay_time < 5.0:
-                try:
-                    retry_res = await requester(payload_value)
-                    retry_elapsed = getattr(retry_res, "elapsed_time", 0.0)
-                    
-                    if retry_elapsed >= 4.0:
-                        evidences.append(f"[Verified] Delay confirmed on retry: {retry_elapsed:.2f}s")
-                        return True, evidences
-                    else:
-                        return False, ["[False Positive] Delay not reproducible"]
-                except Exception:
-                    pass
-        """
         return True, evidences
 
     # [C] 단순 마커 재검증
