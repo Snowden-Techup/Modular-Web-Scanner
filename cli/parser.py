@@ -435,11 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--crawl-mode",
         type=str,
-        choices=["static", "dynamic", "hybrid"],
-        default="hybrid",
+        choices=["static", "dynamic"],
+        default="static",
         help=(
-            "크롤링 방식: static=HTTP 정적만, dynamic=Playwright SPA만, "
-            "hybrid=정적+동적 병렬 (기본)"
+            "크롤링 방식: static=HTTP 정적 (기본), dynamic=Playwright SPA"
         ),
     )
     parser.add_argument(
