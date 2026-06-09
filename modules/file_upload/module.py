@@ -8,7 +8,11 @@ from modules.file_upload.form_helpers import select_upload_target_parameters
 from modules.file_upload.markers import VERIFY_TEMPLATE
 from modules.file_upload.payloads import FilePayload, get_file_upload_payloads
 from modules.file_upload.path_discovery import discover_verify_urls
-from modules.file_upload.verifier import build_verify_url_list, verify_upload_response
+from modules.file_upload.verifier import (
+    build_verify_url_list,
+    is_direct_upload_file_url,
+    verify_upload_response,
+)
 
 
 class FileUploadModule(BaseModule):
@@ -45,7 +49,7 @@ class FileUploadModule(BaseModule):
         """
         Stage-2 active verification:
         - RCE: marker present, interpreter tags stripped (PHP/JSP/…)
-        - Static: malicious content served verbatim (Stored XSS on static hosts)
+        - Static: malicious file content served verbatim from upload URL
         - Template: marker rendered on app routes (Node EJS overwrite)
         """
         if not isinstance(payload, FilePayload):
@@ -68,6 +72,8 @@ class FileUploadModule(BaseModule):
             payload=payload,
             headers=headers,
             cookies=cookies,
+            surface=surface,
+            upload_response=response,
         )
 
         if not verify_urls and (payload.verify_mode or "").lower() == VERIFY_TEMPLATE:
@@ -95,7 +101,8 @@ class FileUploadModule(BaseModule):
             except Exception:
                 continue
 
-            result = verify_upload_response(body, payload)
+            direct_file = is_direct_upload_file_url(verify_url, payload.filename)
+            result = verify_upload_response(body, payload, direct_file=direct_file)
             if result.verified:
                 return True
 

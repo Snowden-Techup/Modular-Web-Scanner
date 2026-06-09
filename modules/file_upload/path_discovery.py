@@ -341,6 +341,62 @@ async def _fetch_text(
         return None
 
 
+class _UploadInjectionResponse:
+    """stored_xss verify_urls.collect_verify_candidate_urls용 응답 shim."""
+
+    def __init__(
+        self,
+        *,
+        url: str = "",
+        text: str = "",
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        self.url = url
+        self.text = text
+        self.headers = headers or {}
+
+
+class _UploadSurfaceShim:
+    """collect_verify_candidate_urls에 넘길 최소 surface."""
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        source_url: str | None = None,
+        headers: dict[str, Any] | None = None,
+        request_content_type: str | None = None,
+        content_type: str | None = None,
+    ) -> None:
+        self.url = url
+        self.source_url = source_url
+        self.headers = headers or {}
+        self.request_content_type = request_content_type
+        self.content_type = content_type
+
+
+def _surface_shim_from_upload(
+    *,
+    surface: Any | None,
+    surface_url: str,
+    source_url: str | None,
+    headers: dict[str, Any] | None,
+) -> _UploadSurfaceShim:
+    if surface is not None:
+        return _UploadSurfaceShim(
+            url=str(getattr(surface, "url", "") or surface_url),
+            source_url=str(getattr(surface, "source_url", "") or "") or source_url,
+            headers=getattr(surface, "headers", None) or headers,
+            request_content_type=getattr(surface, "request_content_type", None),
+            content_type=getattr(surface, "content_type", None),
+        )
+    return _UploadSurfaceShim(
+        url=surface_url,
+        source_url=source_url,
+        headers=headers,
+    )
+
+
 async def discover_verify_urls(
     session: Any,
     *,
@@ -352,24 +408,36 @@ async def discover_verify_urls(
     payload: Any,
     headers: dict[str, Any] | None = None,
     cookies: dict[str, Any] | None = None,
+    surface: Any | None = None,
+    upload_response: Any | None = None,
 ) -> list[str]:
     """
     Run all discovery strategies and return absolute URLs to probe.
 
-    Priority order:
-    1. Parse upload response text directly (JSON / HTML / regex)
-    2a. If upload response is a post listing, follow newest post detail pages
-        and extract file links from them  (stored_xss-style post tracking)
-    2b. GET related pages (form source / parent routes) and parse for filename
-    3. Common upload directory wordlist (fallback)
+    stored_xss ``verify_urls`` 후보 수집 + 파일 경로 추출 + 업로드 디렉터리 fallback.
     """
+    from modules.stored_xss.analyzer import surface_expects_json_api
+    from modules.stored_xss.verify_urls import (
+        collect_verify_candidate_urls,
+        expand_detail_urls_from_list_bodies,
+        infer_list_poll_urls,
+    )
+
     discovered_file_urls: list[str] = []
-    seen_file_urls: set[str] = set()
+    page_probe_urls: list[str] = []
+    seen_urls: set[str] = set()
+
+    def add_probe(url: str) -> None:
+        normalized = _normalize_to_url(base_url, url)
+        if normalized and normalized not in seen_urls:
+            seen_urls.add(normalized)
+            page_probe_urls.append(normalized)
 
     def add_file_url(url: str) -> None:
-        if url and url not in seen_file_urls:
-            seen_file_urls.add(url)
-            discovered_file_urls.append(url)
+        normalized = _normalize_to_url(base_url, url)
+        if normalized and normalized not in seen_urls:
+            seen_urls.add(normalized)
+            discovered_file_urls.append(normalized)
 
     request_kwargs: dict[str, Any] = {}
     if headers:
@@ -377,51 +445,114 @@ async def discover_verify_urls(
     if cookies:
         request_kwargs["cookies"] = cookies
 
+    final_upload_url = str(getattr(upload_response, "url", "") or surface_url or "")
+    upload_headers = getattr(upload_response, "headers", None) or {}
+    injection_res = _UploadInjectionResponse(
+        url=final_upload_url,
+        text=upload_response_text,
+        headers=upload_headers,
+    )
+    surface_shim = _surface_shim_from_upload(
+        surface=surface,
+        surface_url=surface_url,
+        source_url=source_url,
+        headers=headers,
+    )
+
+    # --- Strategy 0: stored_xss verify_urls (redirect, API read, listing, related) ---
+    for candidate in collect_verify_candidate_urls(
+        base_url=base_url,
+        surface=surface_shim,
+        injection_res=injection_res,
+        max_urls=12,
+    ):
+        add_probe(candidate)
+
+    prefers_json = surface_expects_json_api(surface_shim)
+    if prefers_json:
+        list_bodies: list[tuple[str, str]] = []
+        for list_url in infer_list_poll_urls(
+            surface_shim, base_url, upload_response_text
+        )[:3]:
+            list_text = await _fetch_text(session, list_url, request_kwargs)
+            if list_text:
+                list_bodies.append((list_url, list_text))
+        for detail_url in expand_detail_urls_from_list_bodies(
+            list_bodies,
+            base_url=base_url,
+            surface=surface_shim,
+            injection_body=upload_response_text,
+            surface_url=str(surface_shim.url or surface_url),
+            max_items=5,
+        ):
+            add_probe(detail_url)
+
     # --- Strategy 1: parse upload response directly ---
     for path in extract_paths_from_text(upload_response_text, filename):
         add_file_url(_normalize_to_url(base_url, path))
 
-    # --- Strategy 2a: post listing → detail page → file link ---
-    # The upload response is often a redirect to a board/listing page.
-    # Replicate stored_xss logic: find newest post links, visit each,
-    # and look for the uploaded filename inside.
-    post_detail_urls = extract_post_detail_urls(upload_response_text, base_url)
+    # --- Strategy 2: probe pages → detail → file link ---
+    fetch_cache: dict[str, str] = {}
 
-    for detail_url in post_detail_urls:
-        detail_text = await _fetch_text(session, detail_url, request_kwargs)
-        if not detail_text:
+    async def fetch_page(url: str) -> str | None:
+        if url in fetch_cache:
+            return fetch_cache[url]
+        text = await _fetch_text(session, url, request_kwargs)
+        if text is not None:
+            fetch_cache[url] = text
+        return text
+
+    ordered_pages = list(page_probe_urls)
+    ordered_pages.extend(
+        extract_post_detail_urls(upload_response_text, base_url)
+    )
+    for page_url in iter_related_crawl_urls(
+        surface_url=surface_url, source_url=source_url
+    ):
+        if page_url not in seen_urls:
+            ordered_pages.append(page_url)
+
+    for page_url in ordered_pages:
+        page_text = await fetch_page(page_url)
+        if not page_text:
             continue
-        for url in extract_file_links_from_page(detail_text, base_url, filename):
-            add_file_url(url)
-        if discovered_file_urls:
-            # Filename found in a post → stop scanning more posts
-            break
-
-    # --- Strategy 2b: related pages (source, parent routes) ---
-    if not discovered_file_urls:
-        for page_url in iter_related_crawl_urls(
-            surface_url=surface_url, source_url=source_url
-        ):
-            page_text = await _fetch_text(session, page_url, request_kwargs)
-            if not page_text:
+        for path in extract_paths_from_text(page_text, filename):
+            add_file_url(_normalize_to_url(base_url, path))
+        for file_url in extract_file_links_from_page(page_text, base_url, filename):
+            add_file_url(file_url)
+        for detail_url in extract_post_detail_urls(page_text, base_url):
+            detail_text = await fetch_page(detail_url)
+            if not detail_text:
                 continue
-            for path in extract_paths_from_text(page_text, filename):
-                add_file_url(_normalize_to_url(base_url, path))
+            for file_url in extract_file_links_from_page(detail_text, base_url, filename):
+                add_file_url(file_url)
 
-            # This page itself might be a listing — follow its post detail links too
-            for detail_url in extract_post_detail_urls(page_text, base_url):
-                detail_text = await _fetch_text(session, detail_url, request_kwargs)
-                if not detail_text:
-                    continue
-                for url in extract_file_links_from_page(detail_text, base_url, filename):
-                    add_file_url(url)
+    # --- Strategy 3: direct file URLs first, then page probes, then fallback ---
+    ordered: list[str] = []
+    merge_seen: set[str] = set()
 
-    # --- Strategy 3: common directory fallback ---
-    return merge_verify_urls(
+    def append_unique(url: str) -> None:
+        if url and url not in merge_seen:
+            merge_seen.add(url)
+            ordered.append(url)
+
+    for url in discovered_file_urls:
+        append_unique(url)
+
+    for url in build_fallback_urls(base_url, filename):
+        append_unique(url)
+
+    for url in page_probe_urls:
+        append_unique(url)
+
+    for url in merge_verify_urls(
         base_url=base_url,
         filename=filename,
-        discovered_paths=discovered_file_urls,
+        discovered_paths=[],
         payload=payload,
         surface_url=surface_url,
-        include_fallback=True,
-    )
+        include_fallback=False,
+    ):
+        append_unique(url)
+
+    return ordered

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import re
+from typing import Any
+
+import aiohttp
 
 from core.models import Payload
 from modules.base_module import BaseModule
-from modules.ssrf.analyzer import analyze_ssrf
+from modules.ssrf.analyzer import (
+    analyze_ssrf,
+    analyze_ssrf_content_proof,
+    should_defer_ssrf_verify,
+)
 from modules.ssrf.payloads import SSRFPayload, get_ssrf_payloads
+from modules.ssrf.verify import verify_ssrf_readback
 
 # Default display name; keep in sync with ``__init__(name=...)`` default.
 SSRF_MODULE_REPORT_NAME = "Server-Side Request Forgery"
@@ -65,6 +73,7 @@ class SSRFModule(BaseModule):
             include_oob_templates=include_oob_templates,
             bypass_level=bypass_level,
         )
+        self._last_verify_evidence: str = ""
 
     def get_payloads(self) -> list[Payload]:
         return self._payloads
@@ -76,13 +85,33 @@ class SSRFModule(BaseModule):
         elapsed_time: float,
         original_res=None,
         requester=None,
+        surface: Any = None,
     ) -> bool:
-        return analyze_ssrf(
-            response=response,
+        if analyze_ssrf_content_proof(response, payload, elapsed_time, original_res):
+            return True
+        if surface is not None and should_defer_ssrf_verify(surface, response):
+            return True
+        return analyze_ssrf(response, payload, elapsed_time, original_res)
+
+    async def verify(
+        self,
+        session: aiohttp.ClientSession,
+        surface: Any,
+        parameter: str,
+        payload: Payload,
+        response: Any,
+        baseline_response: Any,
+    ) -> bool:
+        verified, evidence = await verify_ssrf_readback(
+            session,
+            surface=surface,
+            parameter=parameter,
             payload=payload,
-            elapsed_time=elapsed_time,
-            original_res=original_res,
+            response=response,
+            baseline_response=baseline_response,
         )
+        self._last_verify_evidence = evidence
+        return verified
 
     def get_target_parameters(self, surface, parameters: list[str]) -> list[str]:
         surface_params: dict = getattr(surface, "parameters", {}) or {}
