@@ -332,14 +332,13 @@ class SPACrawlerEngine:
                     self.route_depths[self.target_url] = 0
                     await wait_for_page_settle(page, context_label="base route load")
                     await capture_and_register_dom_fields(self, page)
+                    try:
+                        await seed_api_candidates_from_scripts(self, page, context)
+                    except Exception as exc:
+                        logger.debug("[SPA Crawler] JS endpoint seeding failed on base route: %s", exc)
                     final_html = await page.content()
                 except Exception as e:
                     logger.debug("[SPA Crawler] Load timeout on base url: %s", e)
-
-                try:
-                    await seed_api_candidates_from_scripts(self, page, context)
-                except Exception as exc:
-                    logger.debug("[SPA Crawler] JS endpoint seeding failed: %s", exc)
 
                 await interact_and_submit(self, page)
                 await interact_and_submit(self, page)
@@ -396,6 +395,14 @@ class SPACrawlerEngine:
                         )
                         await wait_for_page_settle(page, context_label=f"route load:{route}")
                         await capture_and_register_dom_fields(self, page)
+                        try:
+                            await seed_api_candidates_from_scripts(self, page, context)
+                        except Exception as exc:
+                            logger.debug(
+                                "[SPA Crawler] JS endpoint seeding failed on %s: %s",
+                                route,
+                                exc,
+                            )
                         await interact_and_submit(self, page)
                         await interact_and_submit(self, page)
                         await sync_storage_from_browser(self, page)

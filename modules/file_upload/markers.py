@@ -11,6 +11,12 @@ VERIFY_RCE = "rce"
 VERIFY_STATIC = "static"
 VERIFY_TEMPLATE = "template"
 
+# 2차 검증 결과 분류 
+CATEGORY_STATIC_MALICIOUS_FILE = "static_malicious_file"
+CATEGORY_UNRESTRICTED_UPLOAD = "unrestricted_upload"
+CATEGORY_RCE = "rce"
+CATEGORY_TEMPLATE_RCE = "template_rce"
+
 # If any of these appear alongside the marker, the response is source — not execution.
 PHP_SHELL_TAGS = ("<?php", "<?=", "<?", "&lt;?php", "&lt;?=")
 NODE_TEMPLATE_TAGS = ("<%=", "<%", "&lt;%=", "&lt;%")
