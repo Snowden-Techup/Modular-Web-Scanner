@@ -1721,6 +1721,21 @@
       return vulns.length > 0 && "attack_type" in vulns[0];
     }
 
+    function dedupeFlatFindings(items) {
+      const seen = new Set();
+      const out = [];
+      for (const item of items) {
+        const url = item.target?.url || item.url || "";
+        const param = item.target?.parameter || item.parameter || "";
+        const type = String(item.attack_info?.type || item.type || "Unknown").toLowerCase();
+        const key = `${url}\0${param}\0${type}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+      }
+      return out;
+    }
+
     let _guideCounter = 0;
     function toggleGuide(id) {
       const el = document.getElementById(id);
@@ -1862,7 +1877,7 @@
         return;
       }
 
-      const items = rawFindings.length > 0 ? rawFindings : reportVulns;
+      const items = dedupeFlatFindings(rawFindings.length > 0 ? rawFindings : reportVulns);
       if (!items.length) {
         applyFindingCount(scanDone ? 0 : null);
         findingList.innerHTML = scanRunning

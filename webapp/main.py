@@ -29,11 +29,14 @@ from webapp.database import get_db, init_db
 from webapp.database import SessionLocal
 from webapp.db_service import (
     MAX_SCAN_HISTORY_PER_USER,
+    build_oob_report_json,
+    count_deduped_findings,
     findings_from_rows,
     get_oob_token_meta,
     get_scan_by_public_id,
     get_scan_pk,
     get_scan_for_owner,
+    oob_finding_already_exists,
     prune_scan_history,
     replace_scan_findings,
     scan_to_dict,
@@ -569,9 +572,20 @@ async def receive_oob_hit(data: OOBWebhookData) -> dict:
     def _insert_finding():
         db = SessionLocal()
         try:
+            vuln_type = attack_info.get("type", "OOB")
+            if oob_finding_already_exists(
+                db,
+                scan_pk,
+                url=target.get("url"),
+                parameter=target.get("parameter"),
+                vulnerability_type=vuln_type,
+                location=target.get("location") or target.get("method"),
+            ):
+                return
+
             finding = Finding(
                 scan_id=scan_pk,
-                vulnerability_type=attack_info.get("type", "OOB"),
+                vulnerability_type=vuln_type,
                 severity=attack_info.get("risk_level", "High"),
                 location=target.get("location") or target.get("method"),
                 parameter=target.get("parameter"),
@@ -580,13 +594,17 @@ async def receive_oob_hit(data: OOBWebhookData) -> dict:
                 description=description,
             )
             db.add(finding)
+            db.flush()
 
-            # summary.findings 카운트 증가
             scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
             if scan:
+                rows = db.query(Finding).filter(Finding.scan_id == scan_pk).all()
+                deduped_count = count_deduped_findings(rows)
                 summary = dict(scan.summary or {})
-                summary["findings"] = int(summary.get("findings", 0)) + 1
+                summary["findings"] = deduped_count
+                summary["findings_raw"] = len(rows)
                 scan.summary = summary
+                scan.report_json = build_oob_report_json(scan, rows)
                 scan.updated_at = datetime.now(timezone.utc)
 
             db.commit()

@@ -13,12 +13,18 @@ from pathlib import Path
 from webapp.celery_app import celery_app
 from webapp.db_service import (
     append_scan_log,
+    build_oob_report_json,
     bulk_save_oob_tokens,
+    dedupe_finding_dicts,
+    findings_from_rows,
     get_scan_by_public_id,
+    get_scan_findings_rows,
     get_scan_pk,
     replace_scan_findings,
     update_scan_fields,
 )
+
+OOB_WEB_SCAN_TYPES = frozenset({"oob_sqli", "oob_osci"})
 
 
 # ─────────────────────────────────────────
@@ -188,7 +194,7 @@ def _serialize_findings(findings) -> list[dict]:
             "type": attack_type,
             "payload": payload_value,
         })
-    return result
+    return dedupe_finding_dicts(result)
 
 
 SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
@@ -693,12 +699,18 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             progress_pct = max(last_shown_progress, raw_progress_pct)
             last_shown_progress = progress_pct
 
+            findings_count = engine.stats.findings
+            if args.type in OOB_WEB_SCAN_TYPES:
+                scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                if scan_row and scan_row.summary:
+                    findings_count = int(scan_row.summary.get("findings", findings_count))
+
             summary = {
                 "phase": "fuzzing",
                 "queued": queued_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
-                "findings": engine.stats.findings,
+                "findings": findings_count,
                 "elapsed_time": round(time.monotonic() - started_at, 2),
                 "total_requests": effective_total,
                 "planned_requests": total_requests,
@@ -719,7 +731,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 await _scan_log(
                     scan_id,
                     f"진행률 {progress_pct}% (completed={engine.stats.completed}, "
-                    f"findings={engine.stats.findings}, failures={engine.stats.failures})",
+                    f"findings={findings_count}, failures={engine.stats.failures})",
                 )
                 last_logged_progress = progress_pct
 
@@ -735,9 +747,35 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             await asyncio.sleep(0.3)
 
         stats = await scan_task
-    reporter = ReportGenerator(stats=stats, findings=engine.findings)
-    await asyncio.to_thread(reporter.export_to_json, args.output)
-    await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
+
+    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
+    is_oob_web_scan = args.type in OOB_WEB_SCAN_TYPES
+
+    if is_oob_web_scan and scan_pk is not None:
+        def _build_oob_report() -> dict:
+            scan_row = get_scan_by_public_id(scan_id)
+            if scan_row is None:
+                return {}
+            rows = get_scan_findings_rows(scan_pk)
+            return build_oob_report_json(scan_row, rows)
+
+        report_json = await asyncio.to_thread(_build_oob_report)
+
+        def _write_report() -> None:
+            with open(args.output, "w", encoding="utf-8") as fp:
+                json.dump(report_json, fp, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(_write_report)
+        await _scan_log(scan_id, f"OOB 리포트 파일 저장: {args.output}")
+        findings = findings_from_rows(await asyncio.to_thread(get_scan_findings_rows, scan_pk))
+        deduped_findings_count = report_json["metadata"]["summary"]["findings_deduped"]
+    else:
+        reporter = ReportGenerator(stats=stats, findings=engine.findings)
+        await asyncio.to_thread(reporter.export_to_json, args.output)
+        await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
+        report_json = None
+        findings = _serialize_findings(engine.findings)
+        deduped_findings_count = len(findings)
 
     archived_output = _archive_scan_report_path(scan_id)
     archived_output.parent.mkdir(parents=True, exist_ok=True)
@@ -761,17 +799,16 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     except OSError as exc:
         await _scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
 
-    report_json = None
-    try:
-        def _load_report() -> dict:
-            with open(archived_output, "r", encoding="utf-8") as fp:
-                return json.load(fp)
+    if report_json is None:
+        try:
+            def _load_report() -> dict:
+                with open(archived_output, "r", encoding="utf-8") as fp:
+                    return json.load(fp)
 
-        report_json = await asyncio.to_thread(_load_report)
-    except (OSError, json.JSONDecodeError) as exc:
-        await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
+            report_json = await asyncio.to_thread(_load_report)
+        except (OSError, json.JSONDecodeError) as exc:
+            await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
-    findings = _serialize_findings(engine.findings)
     final_total = max(total_requests, stats.queued, stats.completed, 1)
     await _scan_update(
         scan_id,
@@ -783,7 +820,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             "queued": stats.queued,
             "completed": stats.completed,
             "failures": stats.failures,
-            "findings": stats.findings,
+            "findings": deduped_findings_count,
             "elapsed_time": round(time.monotonic() - started_at, 2),
             "total_requests": final_total,
             "planned_requests": total_requests,
@@ -793,7 +830,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 "target": args.url,
                 "scan_type": args.type,
                 "total_requests": stats.completed,
-                "findings": len(findings),
+                "findings": deduped_findings_count,
                 "output": str(archived_output),
             }
         },
@@ -801,7 +838,6 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         error=None,
     )
 
-    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
         await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
 
