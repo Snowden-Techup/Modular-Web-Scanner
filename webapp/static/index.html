@@ -1596,7 +1596,17 @@
         return;
       }
 
-      scanPhaseLabel.hidden = true;
+      const currentModule = scan.summary?.current_module;
+      const moduleIndex = scan.summary?.module_index;
+      const moduleCount = scan.summary?.module_count;
+      if (currentModule) {
+        scanPhaseLabel.hidden = false;
+        scanPhaseLabel.textContent = moduleCount
+          ? `${currentModule} [${moduleIndex}/${moduleCount}]`
+          : currentModule;
+      } else {
+        scanPhaseLabel.hidden = true;
+      }
       progressStats.classList.remove("is-pre-fuzzing");
 
       const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);
@@ -1864,39 +1874,48 @@
       const rawFindings  = scan.findings || [];
       const useGrouped   = reportVulns.length > 0 && isGroupedFormat(reportVulns);
       const scanDone = scan.status === "completed" || scan.status === "failed";
+      const scanRunning = scan.status === "running";
 
-      if (!scanDone) {
-        setFindingCount(null);
+      function applyFindingCount(count) {
+        if (scanDone || (scanRunning && count != null)) {
+          setFindingCount(count);
+        } else {
+          setFindingCount(null);
+        }
       }
 
       if (useGrouped) {
         const sum = scan.report_json?.metadata?.summary || {};
         const dedupedCount = sum.findings_deduped ?? reportVulns.length;
-        if (scanDone) {
-          setFindingCount(dedupedCount);
+        applyFindingCount(dedupedCount);
+        if (scanRunning && reportVulns.length > 0) {
+          findingList.innerHTML = reportVulns.map(renderGroupCard).join("")
+            + '<div class="muted" style="margin-top:12px">스캔 진행 중 — 완료된 모듈 결과가 누적 표시됩니다.</div>';
+        } else {
+          findingList.innerHTML = reportVulns.map(renderGroupCard).join("");
         }
-        findingList.innerHTML = reportVulns.map(renderGroupCard).join("");
         return;
       }
 
       const items = rawFindings.length > 0 ? rawFindings : reportVulns;
       if (!items.length) {
-        if (scanDone) {
-          setFindingCount(0);
-        }
-        findingList.innerHTML = '<div class="muted">발견된 취약점이 없습니다.</div>';
+        applyFindingCount(scanDone ? 0 : null);
+        findingList.innerHTML = scanRunning
+          ? '<div class="muted">스캔 진행 중 — 아직 발견된 취약점이 없습니다.</div>'
+          : '<div class="muted">발견된 취약점이 없습니다.</div>';
         return;
       }
-      if (scanDone) {
-        setFindingCount(items.length);
-      }
+      applyFindingCount(items.length);
       const sorted = [...items].sort((a, b) => {
         const ra = SEVERITY_SORT_ORDER[severityTier(a.attack_info?.severity ?? a.severity)] ?? 4;
         const rb = SEVERITY_SORT_ORDER[severityTier(b.attack_info?.severity ?? b.severity)] ?? 4;
         if (ra !== rb) return ra - rb;
         return (a.target?.url || a.url || "").localeCompare(b.target?.url || b.url || "");
       });
-      findingList.innerHTML = sorted.map((item) => renderFlatCard(item, scan)).join("");
+      findingList.innerHTML = sorted.map((item) => renderFlatCard(item, scan)).join("")
+        + (scanRunning
+          ? '<div class="muted" style="margin-top:12px">스캔 진행 중 — 완료된 모듈 결과가 누적 표시됩니다.</div>'
+          : "");
     }
 
     function formatScanTime(ts) {
