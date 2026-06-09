@@ -16,10 +16,15 @@ from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
 
+import os
+
 def select_modules(args) -> list:
     selected = []
 
     current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
+
+    is_saas_mode = os.getenv("CELERY_WORKER") == "1"
+    current_oob_mode = "webhook" if is_saas_mode else "polling"
 
     if args.type in ("sqli", "all"):
         sqli_module = SQLiModule(
@@ -37,6 +42,7 @@ def select_modules(args) -> list:
             scan_id=current_scan_id,
             oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
             redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+            oob_mode=current_oob_mode
         )
         selected.append(oob_sqli_module)
 
@@ -56,6 +62,7 @@ def select_modules(args) -> list:
             scan_id=current_scan_id,
             oob_domain=getattr(args, "oob_domain", "oob.snowden.kr"),
             redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+            oob_mode=current_oob_mode
         )
         selected.append(oob_osci_module)
 
