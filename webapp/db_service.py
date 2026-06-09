@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session, joinedload
 
 from webapp.database import SessionLocal
-from webapp.models import Finding, Scan, User
+from webapp.models import Finding, OOBIssuedToken, Scan, User
 
 MAX_SCAN_HISTORY_PER_USER = 10
 
@@ -137,6 +137,61 @@ def update_scan_fields(scan_id: str, **fields) -> None:
             setattr(scan, key, value)
         scan.updated_at = datetime.now(timezone.utc)
         db.commit()
+    finally:
+        db.close()
+
+
+def bulk_save_oob_tokens(issued_tokens: list[dict]) -> None:
+    """
+    Celery 스캔 완료 후 발급된 OOB 토큰 목록을 DB에 일괄 저장.
+    이미 존재하는 토큰은 ON CONFLICT 처리 대신 개별 무시 처리.
+
+    각 항목 형식 (base_oob_module.generated_tokens 원소):
+    {
+        "token": str,
+        "scan_id": str,
+        "module_name": str,
+        "target": {"url", "method", "location", "parameter"},
+        "attack_info": {"payload_value", "type", "risk_level"}
+    }
+    """
+    if not issued_tokens:
+        return
+    db = SessionLocal()
+    try:
+        existing = {
+            row.token
+            for row in db.query(OOBIssuedToken.token)
+            .filter(OOBIssuedToken.token.in_([t["token"] for t in issued_tokens]))
+            .all()
+        }
+        to_insert = [t for t in issued_tokens if t["token"] not in existing]
+        for item in to_insert:
+            target = item.get("target", {})
+            attack_info = item.get("attack_info", {})
+            db.add(OOBIssuedToken(
+                token=item["token"],
+                scan_id=item.get("scan_id", ""),
+                module_name=item.get("module_name"),
+                target_url=target.get("url"),
+                target_parameter=target.get("parameter"),
+                target_method=target.get("method"),
+                target_location=target.get("location"),
+                payload_value=attack_info.get("payload_value"),
+                attack_type=attack_info.get("type"),
+                risk_level=attack_info.get("risk_level"),
+            ))
+        if to_insert:
+            db.commit()
+    finally:
+        db.close()
+
+
+def get_oob_token_meta(token: str) -> OOBIssuedToken | None:
+    """webhook 수신 시 token → DB 메타 조회 (Redis 만료 fallback)."""
+    db = SessionLocal()
+    try:
+        return db.query(OOBIssuedToken).filter(OOBIssuedToken.token == token).first()
     finally:
         db.close()
 

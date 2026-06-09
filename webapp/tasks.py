@@ -13,6 +13,7 @@ from pathlib import Path
 from webapp.celery_app import celery_app
 from webapp.db_service import (
     append_scan_log,
+    bulk_save_oob_tokens,
     get_scan_by_public_id,
     get_scan_pk,
     replace_scan_findings,
@@ -334,6 +335,7 @@ async def _async_run_scan_pipeline(
 
     # ── 2. 모듈별 순차 실행 ───────────────────────────────────────────────────
     all_findings: list = []
+    all_pipeline_modules: list = []
     merged_stats = EngineStats(queued=0, completed=0, failures=0, findings=0)
     cumulative_completed = 0
     cumulative_findings = 0
@@ -450,6 +452,7 @@ async def _async_run_scan_pipeline(
             )
 
             all_findings.extend(engine.findings)
+            all_pipeline_modules.extend(context["modules"])
             cumulative_completed += stats.completed
             cumulative_findings += stats.findings
             merged_stats.queued += stats.queued
@@ -548,6 +551,17 @@ async def _async_run_scan_pipeline(
     scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
         await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
+
+    # webhook 모드에서 발급한 OOB 토큰을 DB에 일괄 저장 (Redis TTL 만료 시 fallback용)
+    all_issued_tokens = [
+        item for m in all_pipeline_modules
+        if hasattr(m, "generated_tokens")
+        for item in m.generated_tokens
+        if item.get("token", "").startswith("w")
+    ]
+    if all_issued_tokens:
+        await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+        await _scan_log(scan_id, f"[OOB] {len(all_issued_tokens)}개 토큰을 DB에 저장")
 
     await _scan_log(scan_id, "[Celery/Pipeline] 스캔 완료")
 
@@ -790,6 +804,17 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
         await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
+
+    # webhook 모드에서 발급한 OOB 토큰을 DB에 일괄 저장 (Redis TTL 만료 시 fallback용)
+    all_issued_tokens = [
+        item for m in context["modules"]
+        if hasattr(m, "generated_tokens")
+        for item in m.generated_tokens
+        if item.get("token", "").startswith("w")
+    ]
+    if all_issued_tokens:
+        await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+        await _scan_log(scan_id, f"[OOB] {len(all_issued_tokens)}개 토큰을 DB에 저장")
 
     await _scan_log(scan_id, "[Celery] 스캔 완료")
 

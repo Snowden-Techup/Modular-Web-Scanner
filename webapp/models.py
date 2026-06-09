@@ -71,3 +71,24 @@ class Finding(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     scan: Mapped["Scan"] = relationship("Scan", back_populates="findings")
+
+
+class OOBIssuedToken(Base):
+    """
+    Celery 워커가 OOB 페이로드를 주입할 때 발급한 토큰을 scan_id에 매핑해 저장.
+    Redis TTL 만료 후에도 어떤 스캔에서 발급된 토큰인지 추적 가능하도록 DB에도 기록.
+    """
+    __tablename__ = "oob_issued_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    token: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
+    scan_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    module_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    target_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    target_parameter: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    target_method: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    target_location: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attack_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

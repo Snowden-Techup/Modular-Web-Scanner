@@ -78,9 +78,11 @@ class BaseOOBModule(BaseModule):
         
         # 2. 모드에 따른 매핑 데이터 분기 저장
         if self.oob_mode == "webhook":
-            # SaaS: 메인 서버 Celery가 처리할 수 있도록 Redis에 저장
+            # SaaS: Redis에 저장 (webhook 수신 시 조회용)
             r = await self._get_redis()
             await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))
+            # DB fallback을 위해 메모리에도 기록 (surface_obj 제외 — 직렬화 불가)
+            self.generated_tokens.append(meta_data)
         else:
             # CLI: Redis 없이 메모리에만 저장
             memory_data = meta_data.copy()
