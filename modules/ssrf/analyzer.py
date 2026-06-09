@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import re
+import uuid
+from typing import Any
 
 _CLOUD_TARGET_HINTS = (
     "169.254.169.254",
@@ -27,10 +29,14 @@ _CLOUD_ERROR_HINTS = (
 )
 _INTERNAL_NETWORK_ERROR_HINTS = (
     "connection refused",
+    "econnrefused",
     "no route to host",
     "name or service not known",
     "network is unreachable",
     "connection timed out",
+    "etimedout",
+    "ehostunreach",
+    "enotfound",
     "ssh-2.0",
     "redis_version",
 )
@@ -117,66 +123,201 @@ def _probe_url_echoed_in_body(res_text_lower: str, payload_value_lower: str) -> 
     return False
 
 
+def _match_signature_proof(
+    res_text: str,
+    res_text_lower: str,
+    *,
+    expected_signature: str | None,
+    payload_value_lower: str,
+    original_text_lower: str,
+) -> bool:
+    if not expected_signature:
+        return False
+    try:
+        m_current = re.search(expected_signature, res_text, re.IGNORECASE | re.DOTALL)
+        matched_original = bool(
+            original_text_lower
+            and re.search(expected_signature, original_text_lower, re.IGNORECASE | re.DOTALL)
+        )
+        if m_current and not matched_original:
+            hit = m_current.group(0).lower()
+            if hit and hit not in payload_value_lower:
+                return True
+    except re.error:
+        expected_lower = expected_signature.lower()
+        if (
+            expected_lower in res_text_lower
+            and expected_lower not in original_text_lower
+            and expected_lower not in payload_value_lower
+        ):
+            return True
+    return False
+
+
+def _match_cloud_proof(
+    res_text_lower: str,
+    *,
+    payload_value_lower: str,
+    original_text_lower: str,
+    status_code: int,
+) -> bool:
+    is_cloud_payload = any(hint in payload_value_lower for hint in _CLOUD_TARGET_HINTS)
+    if not is_cloud_payload:
+        return False
+    new_cloud_hints = [
+        hint
+        for hint in _CLOUD_SUCCESS_HINTS
+        if hint in res_text_lower
+        and hint not in original_text_lower
+        and hint not in payload_value_lower
+    ]
+    if status_code == 200 and new_cloud_hints:
+        return True
+    if status_code in (400, 401, 403) and any(
+        hint in res_text_lower for hint in _CLOUD_ERROR_HINTS
+    ):
+        return True
+    return False
+
+
+def _match_internal_network_proof(res_text_lower: str) -> bool:
+    return any(hint in res_text_lower for hint in _INTERNAL_NETWORK_ERROR_HINTS)
+
+
+def _match_time_proof(payload_value_lower: str, elapsed_time: float) -> bool:
+    return (
+        "10.255.255.255" in payload_value_lower or ":22" in payload_value_lower
+    ) and elapsed_time > 10.0
+
+
+def analyze_ssrf_content_proof(
+    response,
+    payload,
+    elapsed_time: float = 0.0,
+    original_res=None,
+) -> bool:
+    """
+    Direct SSRF evidence in the response body (signatures, cloud hints, fetch errors).
+    Excludes boolean-blind length/status deltas that cause MPA redirect false positives.
+    """
+    res_text = _extract_response_text(response)
+    res_text_lower = res_text.lower()
+    original_text = _extract_response_text(original_res) if original_res is not None else ""
+    original_text_lower = original_text.lower()
+    status_code = _extract_status_code(response)
+    payload_value = str(getattr(payload, "value", ""))
+    payload_value_lower = payload_value.lower()
+    expected_signature = getattr(payload, "expected_signature", None)
+
+    if _match_signature_proof(
+        res_text,
+        res_text_lower,
+        expected_signature=expected_signature,
+        payload_value_lower=payload_value_lower,
+        original_text_lower=original_text_lower,
+    ):
+        return True
+    if _match_cloud_proof(
+        res_text_lower,
+        payload_value_lower=payload_value_lower,
+        original_text_lower=original_text_lower,
+        status_code=status_code,
+    ):
+        return True
+    if _match_internal_network_proof(res_text_lower):
+        return True
+    if _match_time_proof(payload_value_lower, elapsed_time):
+        return True
+    return False
+
+
+def analyze_ssrf_readback_proof(res_text: str, payload) -> bool:
+    """SSRF proof in a read-back GET body (stored content, detail API, etc.)."""
+
+    class _ReadbackResponse:
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.status_code = 200
+
+    return analyze_ssrf_content_proof(_ReadbackResponse(res_text), payload)
+
+
+def build_ssrf_verify_probe() -> tuple[str, int, str]:
+    """
+    Unique localhost probe for 2nd-stage verification.
+    Port + path token tie read-back evidence to *this* injection only.
+    """
+    verify_id = uuid.uuid4().hex[:8]
+    probe_port = 40000 + (int(verify_id, 16) % 20000)
+    probe_url = f"http://127.0.0.1:{probe_port}/vfy-{verify_id}/"
+    return verify_id, probe_port, probe_url
+
+
+def readback_shows_new_verify_probe(
+    pre_body: str,
+    post_body: str,
+    *,
+    verify_id: str,
+    probe_port: int,
+) -> bool:
+    """
+    True when post_body contains SSRF side-effect markers from this verify probe
+    that were absent in pre_body (prevents cross-surface / prior-scan contamination).
+    """
+    pre_lower = (pre_body or "").lower()
+    post_lower = (post_body or "").lower()
+    if not post_lower or post_lower == pre_lower:
+        return False
+
+    token = verify_id.lower()
+    if token in post_lower and token not in pre_lower:
+        return True
+
+    port_needle = f":{probe_port}"
+    if port_needle in post_lower and port_needle not in pre_lower:
+        if any(hint in post_lower for hint in _INTERNAL_NETWORK_ERROR_HINTS):
+            return True
+    return False
+
+
+def should_defer_ssrf_verify(surface: Any, response: Any) -> bool:
+    """
+    Mutating write accepted but the inline response lacks SSRF proof (SPA JSON redirect, etc.).
+  Reuses stored_xss store-success heuristics; no app-specific URLs.
+    """
+    from modules.stored_xss.analyzer import (
+        injection_response_implies_failed_auth,
+        is_store_mutation_surface,
+        looks_like_successful_store_api_response,
+        looks_like_successful_store_redirect,
+    )
+
+    if surface is None or not is_store_mutation_surface(surface):
+        return False
+    if injection_response_implies_failed_auth(response):
+        return False
+    body = _extract_response_text(response)
+    if looks_like_successful_store_api_response(response, body):
+        return True
+    return looks_like_successful_store_redirect(response, body, surface)
+
+
 def analyze_ssrf(response, payload, elapsed_time: float, original_res=None) -> bool:
+    if analyze_ssrf_content_proof(response, payload, elapsed_time, original_res):
+        return True
+
     res_text = _extract_response_text(response)
     res_text_lower = res_text.lower()
     original_text = _extract_response_text(original_res) if original_res is not None else ""
     original_text_lower = original_text.lower()
     status_code = _extract_status_code(response)
     original_status_code = _extract_status_code(original_res) if original_res is not None else 0
-    expected_signature = getattr(payload, "expected_signature", None)
     payload_value = str(getattr(payload, "value", ""))
     payload_value_lower = payload_value.lower()
-
-    # 1) Strong signature match (best signal, keep highest priority)
-    if expected_signature:
-        try:
-            m_current = re.search(expected_signature, res_text, re.IGNORECASE | re.DOTALL)
-            matched_original = bool(
-                original_text and re.search(expected_signature, original_text, re.IGNORECASE | re.DOTALL)
-            )
-            if m_current and not matched_original:
-                # If the regex hit is only a substring of the injected URL echoed back
-                # (e.g. ssrf.txt signatures like (ami-id|instance-id|...) on reflected LFI),
-                # do not treat as SSRF proof.
-                hit = m_current.group(0).lower()
-                if not hit or hit not in payload_value_lower:
-                    return True
-        except re.error:
-            expected_lower = expected_signature.lower()
-            if (
-                expected_lower in res_text_lower
-                and expected_lower not in original_text_lower
-                and expected_lower not in payload_value_lower
-            ):
-                return True
-
-    # 2) Cloud metadata endpoint heuristics and cloud-specific errors
     is_cloud_payload = any(hint in payload_value_lower for hint in _CLOUD_TARGET_HINTS)
-    if is_cloud_payload:
-        # Do not treat success hints as evidence when they only appear because they are
-        # part of the injected URL (e.g. .../meta-data/ami-id reflected in HTML). Real
-        # IMDS ami-id responses are usually a single ami-... line without the literal "ami-id".
-        new_cloud_hints = [
-            hint for hint in _CLOUD_SUCCESS_HINTS
-            if hint in res_text_lower
-            and hint not in original_text_lower
-            and hint not in payload_value_lower
-        ]
-        if status_code == 200 and new_cloud_hints:
-            return True
-        if status_code in (400, 401, 403) and any(
-            hint in res_text_lower for hint in _CLOUD_ERROR_HINTS
-        ):
-            return True
-
-    # 3) Internal-network error fingerprints (port-scan style SSRF evidence)
-    if any(hint in res_text_lower for hint in _INTERNAL_NETWORK_ERROR_HINTS):
-        return True
 
     # 4) Boolean-blind style delta checks (host discovery, path brute-force, bypasses)
     is_blind_probe = _is_blind_probe_payload(payload_value_lower)
-    is_cloud_payload = any(hint in payload_value_lower for hint in _CLOUD_TARGET_HINTS)
     attack_type = str(getattr(payload, "attack_type", "")).lower()
     is_bypass_or_basic = ("bypass" in attack_type) or ("basic" in attack_type)
 
@@ -208,8 +349,4 @@ def analyze_ssrf(response, payload, elapsed_time: float, original_res=None) -> b
             if has_login_hints and not had_login_hints:
                 return True
 
-    # 5) Time-based blind hints for deliberate timeout/port probes
-    if ("10.255.255.255" in payload_value_lower or ":22" in payload_value_lower) and elapsed_time > 10.0:
-        return True
-
-    return False
+    return _match_time_proof(payload_value_lower, elapsed_time)

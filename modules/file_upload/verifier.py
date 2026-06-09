@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
 from modules.file_upload.markers import (
+    CATEGORY_RCE,
+    CATEGORY_STATIC_MALICIOUS_FILE,
+    CATEGORY_TEMPLATE_RCE,
+    CATEGORY_UNRESTRICTED_UPLOAD,
     DEFAULT_SHELL_TAGS_BY_MODE,
     NODE_TEMPLATE_TAGS,
     PHP_SHELL_TAGS,
@@ -78,6 +82,14 @@ def extract_dynamic_verify_urls(base_url: str, response_text: str, filename: str
     )
 
 
+def is_direct_upload_file_url(url: str, filename: str) -> bool:
+    """URL path에 업로드 파일명(베이스네임)이 포함되면 직접 파일 서빙으로 간주."""
+    basename = (filename or "").rsplit("/", 1)[-1].strip().lower()
+    if not basename:
+        return False
+    return basename in (urlsplit(url).path or "").lower()
+
+
 def _body_contains_any(body: str, needles: tuple[str, ...]) -> bool:
     lower = body.lower()
     return any(needle.lower() in lower for needle in needles if needle)
@@ -89,9 +101,15 @@ def _shell_tags_for_payload(payload: FilePayload) -> tuple[str, ...]:
     return DEFAULT_SHELL_TAGS_BY_MODE.get(payload.verify_mode, PHP_SHELL_TAGS)
 
 
-def verify_upload_response(body: str, payload: FilePayload) -> VerificationResult:
+def verify_upload_response(
+    body: str,
+    payload: FilePayload,
+    *,
+    direct_file: bool = False,
+) -> VerificationResult:
     """
-    Active verification: distinguish executed code (RCE) vs static reflection (XSS).
+    Active verification: distinguish executed code (RCE) vs static file serve.
+    ``direct_file=True`` — 업로드된 파일 URL 자체를 GET한 경우 (PHP가 Node에서 미실행 등).
     """
     evidences: list[str] = []
     mode = (payload.verify_mode or VERIFY_RCE).lower()
@@ -101,27 +119,32 @@ def verify_upload_response(body: str, payload: FilePayload) -> VerificationResul
         if not probe:
             return VerificationResult(False, "static", "high", evidences)
         if probe not in body:
-            return VerificationResult(False, "stored_xss", "high", evidences)
+            return VerificationResult(False, CATEGORY_STATIC_MALICIOUS_FILE, "high", evidences)
         evidences.append(f"[StaticServe] probe reflected: {probe[:80]}")
-        return VerificationResult(True, "stored_xss", "high", evidences)
+        return VerificationResult(True, CATEGORY_STATIC_MALICIOUS_FILE, "high", evidences)
 
     if mode == VERIFY_TEMPLATE:
         marker = payload.marker
         if marker not in body:
-            return VerificationResult(False, "template_rce", "critical", evidences)
+            return VerificationResult(False, CATEGORY_TEMPLATE_RCE, "critical", evidences)
         if _body_contains_any(body, _shell_tags_for_payload(payload) or NODE_TEMPLATE_TAGS):
-            return VerificationResult(False, "template_rce", "critical", evidences)
+            return VerificationResult(False, CATEGORY_TEMPLATE_RCE, "critical", evidences)
         evidences.append(f"[TemplateRCE] marker rendered without template tags: {marker}")
-        return VerificationResult(True, "template_rce", "critical", evidences)
+        return VerificationResult(True, CATEGORY_TEMPLATE_RCE, "critical", evidences)
 
     # VERIFY_RCE — marker must appear and interpreter tags must be stripped.
     marker = payload.marker
     if marker not in body:
-        return VerificationResult(False, "rce", "critical", evidences)
+        return VerificationResult(False, CATEGORY_RCE, "critical", evidences)
     if _body_contains_any(body, _shell_tags_for_payload(payload)):
-        return VerificationResult(False, "rce", "critical", evidences)
+        if direct_file:
+            evidences.append(
+                f"[UnrestrictedUpload] marker in served file (interpreter not executed): {marker}"
+            )
+            return VerificationResult(True, CATEGORY_UNRESTRICTED_UPLOAD, "high", evidences)
+        return VerificationResult(False, CATEGORY_RCE, "critical", evidences)
     evidences.append(f"[RCE] marker executed (shell tags absent): {marker}")
-    return VerificationResult(True, "rce", "critical", evidences)
+    return VerificationResult(True, CATEGORY_RCE, "critical", evidences)
 
 
 def build_verify_url_list(
