@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--type",
         type=str,
         default="all",
-        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "ssti", "oob", "oob_sqli", "oob_osci", "all"],
+        choices=["sqli", "osci", "bruteforce", "lfi", "file_upload", "ssrf", "stored_xss", "reflected_xss", "ssti", "oob_sqli", "oob_osci", "all"],
         help=(
             "Attack category (default: all). For bruteforce without --bf-target-url, "
             "surfaces come from the crawler; BruteforceModule.get_target_parameters filters targets."
@@ -377,7 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="SSTI payload cap for quick tests (default: all)",
     )
     
-     # ── OOB / OAST 옵션 ──────────────────────────────────────────────────────
+     # ── OOB 옵션 (oob_sqli / oob_osci) ───────────────────────────────────────
 
     parser.add_argument(
         "--oob-domain",
@@ -391,41 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="redis://localhost:6379/0",
         help="Redis URL for OOB module token mapping (default: redis://localhost:6379/0)"
     )
-    parser.add_argument(
-        "--oob-server",
-        type=str,
-        default="http://3.34.47.231",
-        metavar="URL",
-        help=(
-            "외부 OAST 서버 기본 URL (기본: http://3.34.47.231). "
-            "--type oob 사용 시 콜백 수신·폴링에 사용."
-        ),
-    )
-    parser.add_argument(
-        "--oob-retries",
-        type=int,
-        default=3,
-        metavar="N",
-        help=(
-            "OOB 콜백 폴링 최대 시도 횟수 (기본: 3). "
-            "폴링 스케줄: delay×1, delay×2, ..., delay×N"
-        ),
-    )
-    parser.add_argument(
-        "--oob-poll-delay",
-        type=float,
-        default=5.0,
-        metavar="SEC",
-        help="OOB 폴링 기본 대기 시간(초). 선형 증가 적용 (기본: 5.0)",
-    )
-    parser.add_argument(
-        "--oob-poll-timeout",
-        type=float,
-        default=10.0,
-        metavar="SEC",
-        help="OAST API 단일 HTTP 요청 타임아웃(초) (기본: 10.0)",
-    )
-    
+
     parser.add_argument(
         "--local-storage",
         type=str,

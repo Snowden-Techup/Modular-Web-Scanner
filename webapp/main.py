@@ -21,7 +21,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import jwt
 
-from modules.oob.client import DEFAULT_OAST_SERVER_URL
 from webapp.celery_app import celery_app  # noqa: F401 — Celery 앱 등록
 from webapp.database import get_db, init_db
 from webapp.database import SessionLocal
@@ -35,7 +34,6 @@ from webapp.db_service import (
 )
 from webapp.models import Scan, User
 from webapp.tasks import run_scan as celery_run_scan
-from modules.oob.client import DEFAULT_OAST_SERVER_URL
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -55,7 +53,6 @@ SCAN_TYPES = [
     "stored_xss",
     "reflected_xss",
     "ssti",
-    "oob",
 ]
 
 
@@ -148,16 +145,6 @@ class SSTIOptions(BaseModel):
     )
 
 
-class OOBOptions(BaseModel):
-    oob_server: str = Field(
-        default=DEFAULT_OAST_SERVER_URL,
-        description="Standalone OAST server base URL",
-    )
-    oob_retries: int = Field(default=3, ge=1, le=20)
-    oob_poll_delay: float = Field(default=5.0, ge=1.0, le=120.0)
-    oob_poll_timeout: float = Field(default=10.0, ge=1.0, le=60.0)
-
-
 class ScanRequest(BaseModel):
     target_url: str = Field(..., min_length=1, max_length=2048, alias="url")
     scan_type: Literal[
@@ -171,7 +158,6 @@ class ScanRequest(BaseModel):
         "stored_xss",
         "reflected_xss",
         "ssti",
-        "oob",
     ] = "all"
     level: int = Field(default=1, ge=0, le=3)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -184,7 +170,6 @@ class ScanRequest(BaseModel):
     stored_xss: StoredXSSOptions = Field(default_factory=StoredXSSOptions)
     reflected_xss: ReflectedXSSOptions = Field(default_factory=ReflectedXSSOptions)
     ssti: SSTIOptions = Field(default_factory=SSTIOptions)
-    oob: OOBOptions = Field(default_factory=OOBOptions)
 
     model_config = {"populate_by_name": True}
 
@@ -382,10 +367,6 @@ async def get_schema() -> dict:
             "sxss_max_risk_level": "Critical",
             "osci_evasion_level": 1,
             "rxss_evasion_level": 1,
-            "oob_server": DEFAULT_OAST_SERVER_URL,
-            "oob_retries": 3,
-            "oob_poll_delay": 5.0,
-            "oob_poll_timeout": 10.0,
             "crawl_mode": "static",
             "spa_max_routes": 50,
             "local_storage": "{}",

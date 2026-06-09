@@ -7,11 +7,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from modules.ssrf.module import SSRF_MODULE_REPORT_NAME
-from modules.oob.module import OOB_MODULE_REPORT_NAME
 
 _SSRF_INTERNAL_CLASS = "SSRF-Internal"
 _SSRF_OOB_CLASS = "SSRF-OOB"
-_OOB_CLASS = "OOB-Callback"
 _BRUTEFORCE_CLASS = "Bruteforce"
 _STORED_XSS_CLASS = "stored_xss"
 _REFLECTED_XSS_CLASS = "Reflected XSS"
@@ -92,10 +90,6 @@ def _is_ssrf_record(record: dict[str, Any]) -> bool:
     return _module_name(record) == SSRF_MODULE_REPORT_NAME
 
 
-def _is_oob_module_record(record: dict[str, Any]) -> bool:
-    return _module_name(record) == OOB_MODULE_REPORT_NAME
-
-
 def _is_oob_ssrf_record(record: dict[str, Any]) -> bool:
     return record.get("ssrf_channel") == "oob"
 
@@ -153,9 +147,6 @@ def report_attack_type(record: dict[str, Any]) -> str:
     module = _module_name(record)
     raw_type = _raw_attack_type(record)
     base_type = canonical_attack_type_for_grouping(raw_type)
-
-    if _is_oob_module_record(record):
-        return _OOB_CLASS
 
     if _is_ssrf_record(record):
         return _ssrf_report_type(record)

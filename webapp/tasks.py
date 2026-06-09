@@ -80,7 +80,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     sxss = payload.get("stored_xss", {})
     rxss = payload.get("reflected_xss", {})
     ssti = payload.get("ssti", {})
-    oob = payload.get("oob", {})
 
     level = int(payload.get("level", 1))
     bf_min = int(bf.get("bf_min_length", 1))
@@ -91,9 +90,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
             bf_min, bf_max = parse_bf_length(bf_length_str, bf_max)
         except ValueError:
             pass
-
-    from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
-    oob_server_raw = oob.get("oob_server", DEFAULT_OAST_SERVER_URL) or DEFAULT_OAST_SERVER_URL
 
     raw_url = (payload.get("url") or payload.get("target_url") or "").strip()
     scan_url = raw_url.rstrip("/") if raw_url else ""
@@ -169,10 +165,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
             if int(ssti.get("max_payloads", 0) or 0) > 0
             else None
         ),
-        oob_server=normalize_oast_server_url(oob_server_raw),
-        oob_retries=int(oob.get("oob_retries", 3)),
-        oob_poll_delay=float(oob.get("oob_poll_delay", 5.0)),
-        oob_poll_timeout=float(oob.get("oob_poll_timeout", 10.0)),
     )
 
 
@@ -608,9 +600,6 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             f"url={args.login_url}, user={args.username_field}, "
             f"csrf={args.csrf_field or '(없음)'}, submit={args.submit_field or '(없음)'}",
         )
-
-    if args.type == "oob":
-        await _scan_log(scan_id, f"OAST 서버: {args.oob_server}")
 
     cookies = parse_cookies(args.cookie) if args.cookie else {}
     await _scan_log(scan_id, "공격면 수집 시작")
