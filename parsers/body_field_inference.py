@@ -19,6 +19,9 @@ __all__ = (
     "extract_body_field_names_near_url_literal",
 )
 
+# DOM/네트워크에서 흔한 일반 키 — 라벨 시맨틱으로 더 구체적인 필드명으로 정제 가능
+_GENERIC_REFINABLE_FIELD_KEYS = frozenset({"url"})
+
 _NON_WORD_RE = re.compile(r"[^\w\s-]+", re.UNICODE)
 _MULTI_SEP_RE = re.compile(r"[\s-]+")
 _VALID_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -89,7 +92,7 @@ def slugify_field_name(text: str, *, max_len: int = 64) -> str:
     return ""
 
 
-def infer_field_name_from_label_text(label_text: str) -> str:
+def infer_field_name_from_label_text(label_text: str, *, semantic_only: bool = False) -> str:
     """폼 라벨·aria-label·placeholder → 필드명 (HTTP/폼 시맨틱 우선, slug는 보조)."""
     text = str(label_text or "").strip()
     if not text:
@@ -99,6 +102,8 @@ def infer_field_name_from_label_text(label_text: str) -> str:
     for pattern, field_name in _LABEL_SEMANTIC_RULES:
         if pattern.search(text):
             return field_name
+    if semantic_only:
+        return ""
     return slugify_field_name(text)
 
 
@@ -125,6 +130,17 @@ def refine_observed_field_key(
     if not raw_key:
         return ""
     if is_plausible_field_name(raw_key):
+        lowered = raw_key.lower()
+        if lowered in _GENERIC_REFINABLE_FIELD_KEYS:
+            hint = str(label or "").strip()
+            if hint:
+                inferred = infer_field_name_from_label_text(hint, semantic_only=True)
+                if (
+                    inferred
+                    and inferred != lowered
+                    and is_plausible_field_name(inferred)
+                ):
+                    return inferred
         return raw_key
 
     hint_parts = [str(label or "").strip()]

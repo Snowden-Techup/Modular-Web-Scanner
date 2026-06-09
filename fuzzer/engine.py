@@ -549,13 +549,17 @@ class FuzzerEngine:
                         allow_redirects=allow_redir,
                     )
 
-            verdict = module.analyze(
-                response=response,
-                payload=payload,
-                elapsed_time=elapsed_time,
-                original_res=baseline_response,
-                requester=module_requester
-            )
+            analyze_kwargs = {
+                "response": response,
+                "payload": payload,
+                "elapsed_time": elapsed_time,
+                "original_res": baseline_response,
+                "requester": module_requester,
+            }
+            try:
+                verdict = module.analyze(**analyze_kwargs, surface=surface)
+            except TypeError:
+                verdict = module.analyze(**analyze_kwargs)
 
             if isawaitable(verdict):
                 verdict = await verdict
