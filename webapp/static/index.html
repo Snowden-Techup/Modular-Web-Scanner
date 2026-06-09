@@ -900,6 +900,8 @@
                 <option value="all">all (bruteforce 제외)</option>
                 <option value="sqli">sqli</option>
                 <option value="osci">osci</option>
+                <option value="oob_sqli">oob_sqli</option>
+                <option value="oob_osci">oob_osci</option>
                 <option value="bruteforce">bruteforce</option>
                 <option value="lfi">lfi</option>
                 <option value="file_upload">file_upload</option>
@@ -1641,8 +1643,8 @@
 
     function syncModuleDetailPanels() {
       const t = scanTypeSelect.value;
-      const showSqli = t === "all" || t === "sqli";
-      const showOsci = t === "all" || t === "osci";
+      const showSqli = t === "all" || t === "sqli" || t === "oob_sqli";
+      const showOsci = t === "all" || t === "osci" || t === "oob_osci";
       const showBf = t === "bruteforce";
       const showSsrf = t === "all" || t === "ssrf";
       const showSxss = t === "all" || t === "stored_xss";
@@ -1660,8 +1662,8 @@
       moduleDetailSection.hidden = !any;
 
       const labels = [];
-      if (showSqli) labels.push("SQLi");
-      if (showOsci) labels.push("OSCi");
+      if (showSqli) labels.push(t === "oob_sqli" ? "OOB SQLi" : "SQLi");
+      if (showOsci) labels.push(t === "oob_osci" ? "OOB OSCi" : "OSCi");
       if (showBf) labels.push("Bruteforce");
       if (showSsrf) labels.push("SSRF");
       if (showSxss) labels.push("Stored XSS");
