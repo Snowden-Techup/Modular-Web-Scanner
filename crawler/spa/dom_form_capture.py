@@ -67,6 +67,29 @@ _COLLECT_FORM_FIELDS_JS = """() => {
         if (parentLabel && parentLabel.innerText) return parentLabel.innerText.trim();
         const aria = (el.getAttribute('aria-label') || '').trim();
         if (aria) return aria;
+        // React/Vue 등: <label>텍스트</label><input> 형태의 형제 라벨
+        let prev = el.previousElementSibling;
+        if (prev && prev.tagName === 'LABEL' && prev.innerText) {
+            return prev.innerText.trim();
+        }
+        // 같은 field-group 컨테이너 안의 첫 label (div > label + input 패턴)
+        const group = el.closest('div, fieldset, section, li, p');
+        if (group) {
+            const labels = group.querySelectorAll(':scope > label');
+            if (labels.length === 1 && labels[0].innerText) {
+                return labels[0].innerText.trim();
+            }
+            for (const lbl of labels) {
+                if (!lbl.innerText) continue;
+                let node = lbl.nextElementSibling;
+                while (node) {
+                    if (node === el || node.contains(el)) {
+                        return lbl.innerText.trim();
+                    }
+                    node = node.nextElementSibling;
+                }
+            }
+        }
         return '';
     }
 
@@ -86,16 +109,18 @@ _COLLECT_FORM_FIELDS_JS = """() => {
             if (fromData) return fromData;
         }
 
-        const type = (el.getAttribute('type') || 'text').toLowerCase();
-        const typeHints = { email: 'email', password: 'password', search: 'q', tel: 'phone', url: 'url' };
-        if (typeHints[type]) return typeHints[type];
-
         const label = labelTextForControl(el);
         const placeholder = (el.getAttribute('placeholder') || '').trim();
         const fromLabel = inferFromSemanticLabel(label);
         if (fromLabel) return fromLabel;
+
+        const type = (el.getAttribute('type') || 'text').toLowerCase();
+        const typeHints = { email: 'email', password: 'password', search: 'q', tel: 'phone', url: 'url' };
+        if (typeHints[type]) return typeHints[type];
+
+        // placeholder의 예시 URL(http://…)은 필드명이 아님 — 라벨 slug만 사용
         if (looksLikeUrl(placeholder)) {
-            return fromLabel || 'url';
+            return slugify(label) || '';
         }
         return slugify(label) || slugify(placeholder);
     }
@@ -152,22 +177,27 @@ def _normalize_dom_capture(raw: object) -> tuple[dict[str, str], dict[str, str]]
     return sanitize_field_map(values, label_hints=label_hints), label_hints
 
 
-async def extract_visible_form_fields(page) -> dict[str, str]:
+async def extract_visible_form_fields(page) -> tuple[dict[str, str], dict[str, str]]:
     try:
         raw = await page.evaluate(_COLLECT_FORM_FIELDS_JS)
     except Exception as exc:
         logger.debug("[SPA Crawler] DOM form field capture failed: %s", exc)
-        return {}
-    fields, _ = _normalize_dom_capture(raw)
-    return fields
+        return {}, {}
+    return _normalize_dom_capture(raw)
 
 
-def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]) -> int:
+def register_dom_fields_for_route(
+    engine,
+    route_url: str,
+    fields: dict[str, str],
+    *,
+    label_hints: dict[str, str] | None = None,
+) -> int:
     """
     현재 클라이언트 라우트의 input/textarea name을 관련 API path_key에 병합.
     React controlled form은 XHR 전까지 body 샘플이 비는 경우가 많다.
     """
-    fields = sanitize_field_map(fields)
+    fields = sanitize_field_map(fields, label_hints=label_hints)
     if not fields:
         return 0
 
@@ -193,7 +223,7 @@ def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]
             if key_str not in bucket or not str(bucket.get(key_str) or "").strip():
                 bucket[key_str] = str(value)
         if len(bucket) > before or (before == 0 and bucket):
-            samples_map[path_key] = sanitize_field_map(bucket)
+            samples_map[path_key] = sanitize_field_map(bucket, label_hints=label_hints)
             updated += 1
         register_observed_body_field_hints(engine, path_key, fields.keys())
 
@@ -226,11 +256,11 @@ def register_dom_fields_for_route(engine, route_url: str, fields: dict[str, str]
 
 
 async def capture_and_register_dom_fields(engine, page) -> None:
-    fields = await extract_visible_form_fields(page)
+    fields, label_hints = await extract_visible_form_fields(page)
     if not fields:
         return
     route_url = str(getattr(page, "url", "") or getattr(engine, "current_route_url", "") or "")
-    count = register_dom_fields_for_route(engine, route_url, fields)
+    count = register_dom_fields_for_route(engine, route_url, fields, label_hints=label_hints)
     if count:
         logger.debug(
             "[SPA Crawler] DOM form fields (%s keys) linked to %s API path(s) on %s",
