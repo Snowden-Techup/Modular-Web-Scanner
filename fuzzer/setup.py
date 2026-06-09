@@ -15,13 +15,18 @@ from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
 from modules.ssti.module import SSTIModule
-from modules.oob.client import DEFAULT_OAST_SERVER_URL, OASTClient, normalize_oast_server_url
+from modules.oob.client import OASTClient, normalize_oast_server_url
 from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
 
 # (module_type, accepted args.type values, factory)
 _ModuleDef = tuple[str, tuple[str, ...], Callable[[Any], Any]]
+
+
+def _oob_mode() -> str:
+    is_saas_mode = os.getenv("CELERY_WORKER") == "1"
+    return "webhook" if is_saas_mode else "polling"
 
 
 def _module_defs(args) -> list[_ModuleDef]:
@@ -145,6 +150,7 @@ def select_modules(args) -> list:
         current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
         oob_domain = getattr(args, "oob_domain", None) or os.getenv("OOB_DOMAIN", "oob.snowden.kr")
         redis_url = getattr(args, "redis_url", None) or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        current_oob_mode = _oob_mode()
         if args.type == "oob_osci":
             selected.append(
                 OOB_OSCiModule(
@@ -153,6 +159,7 @@ def select_modules(args) -> list:
                     scan_id=current_scan_id,
                     oob_domain=oob_domain,
                     redis_url=redis_url,
+                    oob_mode=current_oob_mode,
                 )
             )
         else:
@@ -163,6 +170,7 @@ def select_modules(args) -> list:
                     scan_id=current_scan_id,
                     oob_domain=oob_domain,
                     redis_url=redis_url,
+                    oob_mode=current_oob_mode,
                 )
             )
 

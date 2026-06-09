@@ -24,6 +24,12 @@ class BaseOOBModule(BaseModule):
         # Scan ID 저장
         self.scan_id = kwargs.get("scan_id", "UNKNOWN_SCAN_ID")
         
+        # 자동으로 감지된 모드
+        self.oob_mode = kwargs.get("oob_mode", "polling").lower()
+        
+        # CLI(polling) 모드일 때 토큰과 타겟 매핑 정보를 저장할 리스트
+        self.generated_tokens = []
+
         # Redis 커넥션 풀 (지연 할당)
         self._redis = None
 
@@ -37,9 +43,13 @@ class BaseOOBModule(BaseModule):
         """
         엔진 훅: 워커가 HTTP 요청을 보내기 직전에 호출.
         """
-        # 1. 8자리 고유 토큰 생성
-        token = uuid.uuid4().hex[:8]
-        
+        # 1. 1바이트 Prefix 포함한 9바이트 토큰 생성
+        raw_token = uuid.uuid4().hex[:8]
+        if self.oob_mode == "webhook":
+            token = f"w{raw_token}"  # SaaS 모드: w (웹훅)
+        else:
+            token = f"c{raw_token}"  # CLI 모드: c (폴링)
+            
         # 실제 타겟에 주입될 도메인
         oob_host = f"{token}.{self.oob_domain}"
         
@@ -49,9 +59,8 @@ class BaseOOBModule(BaseModule):
         method_raw = getattr(surface, "method", "GET")
         method_str = getattr(method_raw, "value", str(method_raw))
         
-        # 2. 메인 스캐너의 Webhook 리시버가 참조할 수 있도록 Redis에 매핑 데이터 저장
-        r = await self._get_redis()
         meta_data = {
+            "token": token,  # 메모리 대조를 위해 토큰값 포함
             "scan_id": self.scan_id,
             "module_name": self.name,
             "target": {
@@ -67,8 +76,16 @@ class BaseOOBModule(BaseModule):
             }
         }
         
-        # 토큰을 키로 하여 TTL(24시간)과 함께 저장 (Fire & Forget)
-        await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))
+        # 2. 모드에 따른 매핑 데이터 분기 저장
+        if self.oob_mode == "webhook":
+            # SaaS: 메인 서버 Celery가 처리할 수 있도록 Redis에 저장
+            r = await self._get_redis()
+            await r.setex(f"oob_map:{token}", self.oob_ttl, json.dumps(meta_data))
+        else:
+            # CLI: Redis 없이 메모리에만 저장
+            memory_data = meta_data.copy()
+            memory_data["surface_obj"] = surface
+            self.generated_tokens.append(memory_data)
 
         # 3. Payload 객체의 value 치환 후 복제본 반환
         new_value = payload.value.replace("[OOB_HOST]", oob_host)
