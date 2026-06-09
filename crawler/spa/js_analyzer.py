@@ -329,6 +329,23 @@ async def _fetch_script_text(context, script_url: str, timeout_ms: int) -> str:
     return body.decode("utf-8", errors="ignore")
 
 
+def _scanned_js_script_urls(engine) -> set[str]:
+    scanned = getattr(engine, "_js_scanned_script_urls", None)
+    if scanned is None:
+        engine._js_scanned_script_urls = set()
+        scanned = engine._js_scanned_script_urls
+    return scanned
+
+
+def _resolve_endpoint_path_key(base_url: str, endpoint_url: str) -> str:
+    """절대/상대 API 경로를 path_key로 정규화 (번들 URL 기준 join 오류 방지)."""
+    raw = str(endpoint_url or "").strip()
+    if raw.startswith(("http://", "https://", "//")):
+        return path_key_from_url(raw)
+    joined = urljoin(base_url, raw)
+    return path_key_from_url(joined)
+
+
 async def seed_api_candidates_from_scripts(engine, page, context) -> int:
     try:
         html_text = await page.content()
@@ -338,6 +355,7 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
 
     page_url = page.url or getattr(engine, "target_url", "")
     script_urls, inline_scripts = _extract_scripts_from_html(html_text, page_url)
+    scanned_scripts = _scanned_js_script_urls(engine)
     added = 0
 
     for base_url, script_text in inline_scripts:
@@ -359,13 +377,15 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
                 if near_fields:
                     register_observed_body_field_hints(
                         engine,
-                        path_key_from_url(urljoin(base_url, endpoint_url)),
+                        _resolve_endpoint_path_key(base_url, endpoint_url),
                         near_fields,
                     )
         engine.metrics["js_scripts_scanned"] += 1
 
     timeout_ms = int(getattr(engine, "route_timeout", 5000) or 5000)
     for script_url in script_urls:
+        if script_url in scanned_scripts:
+            continue
         if not is_in_scope(engine, script_url):
             continue
         try:
@@ -375,6 +395,7 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
             continue
         if not script_text:
             continue
+        scanned_scripts.add(script_url)
         for method, endpoint_url, content_type in _extract_from_script_text(script_text, base_url=script_url):
             if not is_in_scope(engine, endpoint_url):
                 continue
@@ -393,7 +414,7 @@ async def seed_api_candidates_from_scripts(engine, page, context) -> int:
                 if near_fields:
                     register_observed_body_field_hints(
                         engine,
-                        path_key_from_url(urljoin(script_url, endpoint_url)),
+                        _resolve_endpoint_path_key(page_url, endpoint_url),
                         near_fields,
                     )
         engine.metrics["js_scripts_scanned"] += 1
