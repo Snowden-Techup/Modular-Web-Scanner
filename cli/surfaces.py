@@ -17,21 +17,6 @@ from parsers.surface_builder import SurfaceBuilder
 from crawler.url_filter import URLFilter
 
 
-class CrawlQueueProxy:
-    """정적 크롤러가 종료 시 보내는 None(종료 신호)을 차단하는 프록시 큐 (하이브리드 전용)."""
-
-    def __init__(self, q_mgr: QueueManager):
-        self._q = q_mgr
-
-    async def add_page(self, page_data):
-        if page_data is None:
-            return
-        await self._q.add_page(page_data)
-
-    def __getattr__(self, name):
-        return getattr(self._q, name)
-
-
 def _export_surfaces_json(surfaces: list[AttackSurface], output_path: str) -> None:
     payload = [surface.to_dict() for surface in surfaces]
     with open(output_path, "w", encoding="utf-8") as fp:
@@ -113,11 +98,11 @@ async def _resolve_crawled_surfaces(
         cookies: dict[str, str] | None = None,
 ) -> list[AttackSurface]:
     """
-    크롤러(정적/동적/하이브리드) → 큐 → SurfaceBuilder 파이프라인.
+    크롤러(정적/동적) → 큐 → SurfaceBuilder 파이프라인.
     """
-    crawl_mode = getattr(args, "crawl_mode", "hybrid")
-    if crawl_mode not in ("static", "dynamic", "hybrid"):
-        print(f"Invalid crawl mode: {crawl_mode!r}. Use static, dynamic, or hybrid.")
+    crawl_mode = getattr(args, "crawl_mode", "static")
+    if crawl_mode not in ("static", "dynamic"):
+        print(f"Invalid crawl mode: {crawl_mode!r}. Use static or dynamic.")
         return []
 
     queue_manager = QueueManager()
@@ -156,10 +141,8 @@ async def _resolve_crawled_surfaces(
     if cookies:
         crawler.session_manager.set_cookies(cookies)
 
-    run_static = crawl_mode in ("static", "hybrid")
-    run_dynamic = crawl_mode in ("dynamic", "hybrid")
-    static_stats = None
-    dynamic_summary = None
+    run_static = crawl_mode == "static"
+    run_dynamic = crawl_mode == "dynamic"
 
     try:
         # 정적 크롤 또는 하이브리드: aiohttp 폼 로그인 (전통 앱·세션 쿠키)
@@ -177,9 +160,6 @@ async def _resolve_crawled_surfaces(
         updated_cookies = crawler.session_manager.get_cookies()
         auth_config = _auth_config_from_args(args)
 
-        if run_static and crawl_mode == "hybrid":
-            crawler.queue_manager = CrawlQueueProxy(queue_manager)
-
         spa_crawler = None
         if run_dynamic:
             from crawler.spa.engine import SPACrawlerEngine
@@ -195,7 +175,7 @@ async def _resolve_crawled_surfaces(
                 safe_click=not bool(getattr(args, "unsafe_click", False)),
             )
 
-        mode_label = {"static": "static", "dynamic": "dynamic (SPA)", "hybrid": "hybrid (static + SPA)"}
+        mode_label = {"static": "static", "dynamic": "dynamic (SPA)"}
         print(f"[*] Crawl mode: {mode_label[crawl_mode]}")
 
         async def _run_spa_crawler() -> None:
@@ -204,20 +184,14 @@ async def _resolve_crawled_surfaces(
                 await spa_crawler.start()
 
         async def run_producers():
-            nonlocal static_stats, dynamic_summary
-            tasks: list[tuple[str, asyncio.Task]] = []
+            tasks: list[asyncio.Task] = []
             if run_static:
-                tasks.append(("static", asyncio.create_task(crawler.start(start_url))))
+                tasks.append(asyncio.create_task(crawler.start(start_url)))
             if run_dynamic and spa_crawler is not None:
-                tasks.append(("dynamic", asyncio.create_task(_run_spa_crawler())))
+                tasks.append(asyncio.create_task(_run_spa_crawler()))
             try:
                 if tasks:
-                    results = await asyncio.gather(*(task for _, task in tasks))
-                    for (name, _), result in zip(tasks, results):
-                        if name == "static":
-                            static_stats = result
-                    if spa_crawler is not None:
-                        dynamic_summary = spa_crawler.get_summary()
+                    await asyncio.gather(*tasks)
             finally:
                 await queue_manager.add_page(None)
 
@@ -237,20 +211,6 @@ async def _resolve_crawled_surfaces(
             print(
                 f"[*] Auth/login surfaces skipped: {skipped_auth} "
                 f"(use --fuzz-auth or bruteforce mode to include them)"
-            )
-        if crawl_mode == "hybrid":
-            static_ok = int((static_stats or {}).get("successful_requests", 0) or 0)
-            static_forms = int((static_stats or {}).get("forms_found", 0) or 0)
-            static_links = int((static_stats or {}).get("links_found", 0) or 0)
-            static_duration = (static_stats or {}).get("duration", "0.00s")
-            dynamic_apis = int((dynamic_summary or {}).get("apis_found", 0) or 0)
-            dynamic_links = int((dynamic_summary or {}).get("links_extracted", 0) or 0)
-            dynamic_routes = int((dynamic_summary or {}).get("routes_visited", 0) or 0)
-            dynamic_duration = (dynamic_summary or {}).get("duration", "0.00s")
-            print(
-                "[*] Hybrid summary | "
-                f"Static(req={static_ok}, forms={static_forms}, links={static_links}, duration={static_duration}) | "
-                f"Dynamic(apis={dynamic_apis}, links={dynamic_links}, routes={dynamic_routes}, duration={dynamic_duration})"
             )
     except Exception as exc:
         print(f"Failed to crawl target URL {start_url}: {exc}")

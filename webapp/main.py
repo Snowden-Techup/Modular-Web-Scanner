@@ -73,7 +73,7 @@ class AuthSettings(BaseModel):
 
 
 class CrawlerOptions(BaseModel):
-    crawl_mode: Literal["static", "dynamic", "hybrid"] = "static"
+    crawl_mode: Literal["static", "dynamic"] = "static"
     spa_max_routes: int = Field(default=50, ge=1, le=500)
     unsafe_click: bool = False
     local_storage: str = "{}"

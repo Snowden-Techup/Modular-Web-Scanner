@@ -250,7 +250,7 @@ async def create_scan_auth_provider(
     for name, value in collect_cookies_from_surfaces(surfaces).items():
         auth_cookies[name] = value
 
-    crawl_mode = str(getattr(args, "crawl_mode", "hybrid") or "hybrid").lower()
+    crawl_mode = str(getattr(args, "crawl_mode", "static") or "static").lower()
     has_crawl_session = _has_session_cookie(auth_cookies)
 
     login_url = (getattr(args, "login_url", "") or "").strip()
