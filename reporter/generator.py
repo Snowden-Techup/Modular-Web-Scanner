@@ -231,9 +231,21 @@ class ReportGenerator:
 
     def build_deduped_report(self) -> dict[str, Any]:
         discovery_vulnerabilities = [self._finding_to_dict(f) for f in self.findings]
-        deduped = dedupe_vulnerabilities(discovery_vulnerabilities, mode="first_in_order")
+        return self.build_deduped_report_from_records(
+            discovery_vulnerabilities,
+            raw_findings_count=self.stats.findings,
+        )
+
+    def build_deduped_report_from_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        raw_findings_count: int | None = None,
+    ) -> dict[str, Any]:
+        deduped = dedupe_vulnerabilities(records, mode="first_in_order")
         deduped_sorted = sorted(deduped, key=vulnerability_sort_key)
         grouped = self._group_vulnerabilities_by_type(deduped_sorted)
+        raw_count = len(records) if raw_findings_count is None else raw_findings_count
         return {
             "metadata": {
                 "scan_time": self.timestamp,
@@ -243,7 +255,7 @@ class ReportGenerator:
                     "failures": self.stats.failures,
                     "vulnerability_types": len(grouped),
                     "findings_deduped": len(deduped_sorted),
-                    "findings_raw": self.stats.findings,
+                    "findings_raw": raw_count,
                 },
             },
             "vulnerabilities": grouped,

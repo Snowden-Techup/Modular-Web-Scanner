@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session, joinedload
 
 from webapp.database import SessionLocal
-from webapp.models import Finding, Scan, User
+from webapp.models import Finding, OOBIssuedToken, Scan, User
 
 MAX_SCAN_HISTORY_PER_USER = 10
+# psycopg/PostgreSQL bind parameter limit is 65535; keep IN batches well below that.
+_OOB_TOKEN_BATCH_SIZE = 2000
 
 
 def _ts(dt: datetime | None) -> float:
@@ -76,8 +78,74 @@ def prune_scan_history(db: Session, owner_id: int, keep: int = MAX_SCAN_HISTORY_
     return deleted
 
 
+def _flat_finding_to_record(item: dict) -> dict:
+    return {
+        "target": {
+            "url": item.get("url") or "",
+            "method": item.get("method") or "",
+            "location": item.get("location") or "",
+            "parameter": item.get("parameter") or "",
+        },
+        "attack_info": {
+            "type": item.get("type") or "Unknown",
+            "severity": item.get("severity") or "high",
+            "payload_value": item.get("payload") or "",
+        },
+        **({"module": item["module"]} if item.get("module") else {}),
+    }
+
+
+def _record_to_flat_finding(record: dict) -> dict:
+    target = record.get("target") or {}
+    attack = record.get("attack_info") or {}
+    return {
+        "severity": attack.get("severity") or "high",
+        "location": target.get("location") or "",
+        "parameter": target.get("parameter") or "",
+        "url": target.get("url") or "",
+        "type": attack.get("type") or "Unknown",
+        "payload": attack.get("payload_value") or "",
+    }
+
+
+def dedupe_finding_dicts(items: list[dict]) -> list[dict]:
+    """Collapse flat finding dicts to one entry per URL / parameter / attack class."""
+    if not items:
+        return []
+    from reporter.dedupe import dedupe_vulnerabilities, vulnerability_sort_key
+
+    records = [_flat_finding_to_record(item) for item in items]
+    deduped = dedupe_vulnerabilities(records, mode="first_in_order")
+    deduped_sorted = sorted(deduped, key=vulnerability_sort_key)
+    return [_record_to_flat_finding(rec) for rec in deduped_sorted]
+
+
+def finding_group_key(
+    *,
+    url: str | None,
+    parameter: str | None,
+    vulnerability_type: str | None,
+    location: str | None = None,
+    method: str | None = None,
+    module: str | None = None,
+) -> tuple[str, str, str, str, str]:
+    from reporter.dedupe import vulnerability_group_key
+
+    record = _flat_finding_to_record(
+        {
+            "url": url,
+            "parameter": parameter,
+            "type": vulnerability_type,
+            "location": location,
+            "method": method,
+            **({"module": module} if module else {}),
+        }
+    )
+    return vulnerability_group_key(record)
+
+
 def findings_from_rows(rows: list[Finding]) -> list[dict]:
-    return [
+    raw = [
         {
             "severity": row.severity,
             "location": row.location or "",
@@ -88,6 +156,87 @@ def findings_from_rows(rows: list[Finding]) -> list[dict]:
         }
         for row in rows
     ]
+    return dedupe_finding_dicts(raw)
+
+
+def count_deduped_findings(rows: list[Finding]) -> int:
+    return len(findings_from_rows(rows))
+
+
+def oob_finding_already_exists(
+    db: Session,
+    scan_pk: int,
+    *,
+    url: str | None,
+    parameter: str | None,
+    vulnerability_type: str | None,
+    location: str | None = None,
+) -> bool:
+    target_key = finding_group_key(
+        url=url,
+        parameter=parameter,
+        vulnerability_type=vulnerability_type,
+        location=location,
+    )
+    existing_rows = db.query(Finding).filter(Finding.scan_id == scan_pk).all()
+    for row in existing_rows:
+        if finding_group_key(
+            url=row.url,
+            parameter=row.parameter,
+            vulnerability_type=row.vulnerability_type,
+            location=row.location,
+        ) == target_key:
+            return True
+    return False
+
+
+def get_scan_findings_rows(scan_pk: int) -> list[Finding]:
+    db = SessionLocal()
+    try:
+        return db.query(Finding).filter(Finding.scan_id == scan_pk).all()
+    finally:
+        db.close()
+
+
+def build_oob_report_json(scan: Scan, rows: list[Finding] | None = None) -> dict:
+    """Build grouped deduped report JSON from persisted OOB webhook findings."""
+    from fuzzer import EngineStats
+    from reporter import ReportGenerator
+
+    finding_rows = rows if rows is not None else list(scan.findings)
+    flat = [
+        {
+            "severity": row.severity,
+            "location": row.location or "",
+            "parameter": row.parameter or "",
+            "url": row.url or "",
+            "type": row.vulnerability_type,
+            "payload": row.payload or "",
+        }
+        for row in finding_rows
+    ]
+    records: list[dict] = []
+    for item in dedupe_finding_dicts(flat):
+        record = _flat_finding_to_record(item)
+        record["evidence"] = {
+            "status_code": 0,
+            "response_time": 0.0,
+            "error_log": "OOB Callback (verified)",
+        }
+        records.append(record)
+
+    summary = scan.summary or {}
+    stats = EngineStats(
+        queued=int(scan.total_requests or summary.get("queued", 0) or 0),
+        completed=int(summary.get("completed", 0) or 0),
+        failures=int(summary.get("failures", 0) or 0),
+        findings=len(finding_rows),
+    )
+    reporter = ReportGenerator(stats=stats, findings=[])
+    return reporter.build_deduped_report_from_records(
+        records,
+        raw_findings_count=len(finding_rows),
+    )
 
 
 def get_scan_for_owner(db: Session, scan_id: str, owner_id: int) -> Scan | None:
@@ -141,11 +290,84 @@ def update_scan_fields(scan_id: str, **fields) -> None:
         db.close()
 
 
+def _oob_token_from_item(item: dict) -> OOBIssuedToken:
+    target = item.get("target", {})
+    attack_info = item.get("attack_info", {})
+    return OOBIssuedToken(
+        token=item["token"],
+        scan_id=item.get("scan_id", ""),
+        module_name=item.get("module_name"),
+        target_url=target.get("url"),
+        target_parameter=target.get("parameter"),
+        target_method=target.get("method"),
+        target_location=target.get("location"),
+        payload_value=attack_info.get("payload_value"),
+        attack_type=attack_info.get("type"),
+        risk_level=attack_info.get("risk_level"),
+    )
+
+
+def bulk_save_oob_tokens(issued_tokens: list[dict]) -> int:
+    """
+    Celery 스캔 완료 후 발급된 OOB 토큰 목록을 DB에 일괄 저장.
+    이미 존재하는 토큰은 ON CONFLICT 처리 대신 개별 무시 처리.
+
+    각 항목 형식 (base_oob_module.generated_tokens 원소):
+    {
+        "token": str,
+        "scan_id": str,
+        "module_name": str,
+        "target": {"url", "method", "location", "parameter"},
+        "attack_info": {"payload_value", "type", "risk_level"}
+    }
+
+    Returns the number of rows inserted.
+    """
+    if not issued_tokens:
+        return 0
+
+    inserted = 0
+    db = SessionLocal()
+    try:
+        for offset in range(0, len(issued_tokens), _OOB_TOKEN_BATCH_SIZE):
+            chunk = issued_tokens[offset : offset + _OOB_TOKEN_BATCH_SIZE]
+            token_list = [t["token"] for t in chunk]
+            existing = {
+                row.token
+                for row in db.query(OOBIssuedToken.token)
+                .filter(OOBIssuedToken.token.in_(token_list))
+                .all()
+            }
+            batch_inserted = 0
+            for item in chunk:
+                if item["token"] in existing:
+                    continue
+                db.add(_oob_token_from_item(item))
+                batch_inserted += 1
+            if batch_inserted:
+                db.commit()
+                inserted += batch_inserted
+            else:
+                db.rollback()
+    finally:
+        db.close()
+    return inserted
+
+
+def get_oob_token_meta(token: str) -> OOBIssuedToken | None:
+    """webhook 수신 시 token → DB 메타 조회 (Redis 만료 fallback)."""
+    db = SessionLocal()
+    try:
+        return db.query(OOBIssuedToken).filter(OOBIssuedToken.token == token).first()
+    finally:
+        db.close()
+
+
 def replace_scan_findings(scan_pk: int, serialized: list[dict]) -> None:
     db = SessionLocal()
     try:
         db.query(Finding).filter(Finding.scan_id == scan_pk).delete()
-        for item in serialized:
+        for item in dedupe_finding_dicts(serialized):
             db.add(
                 Finding(
                     scan_id=scan_pk,

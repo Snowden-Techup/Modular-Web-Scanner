@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from modules.ssrf.module import SSRF_MODULE_REPORT_NAME
-from modules.oob.module import OOB_MODULE_REPORT_NAME
 
 _SSRF_INTERNAL_CLASS = "SSRF-Internal"
 _SSRF_OOB_CLASS = "SSRF-OOB"
-_OOB_CLASS = "OOB-Callback"
+_OOB_OSCI_CLASS = "OSCi-OOB"
+_OOB_SQLI_CLASS = "SQLi-OOB"
 _BRUTEFORCE_CLASS = "Bruteforce"
 _STORED_XSS_CLASS = "stored_xss"
 _REFLECTED_XSS_CLASS = "Reflected XSS"
@@ -92,10 +92,6 @@ def _is_ssrf_record(record: dict[str, Any]) -> bool:
     return _module_name(record) == SSRF_MODULE_REPORT_NAME
 
 
-def _is_oob_module_record(record: dict[str, Any]) -> bool:
-    return _module_name(record) == OOB_MODULE_REPORT_NAME
-
-
 def _is_oob_ssrf_record(record: dict[str, Any]) -> bool:
     return record.get("ssrf_channel") == "oob"
 
@@ -154,14 +150,20 @@ def report_attack_type(record: dict[str, Any]) -> str:
     raw_type = _raw_attack_type(record)
     base_type = canonical_attack_type_for_grouping(raw_type)
 
-    if _is_oob_module_record(record):
-        return _OOB_CLASS
-
     if _is_ssrf_record(record):
         return _ssrf_report_type(record)
 
+    if module == "OOB OS Command Injection":
+        return _OOB_OSCI_CLASS
+
+    if module == "OOB SQL Injection":
+        return _OOB_SQLI_CLASS
+
     if module == "OS Command Injection":
         return _osci_report_type(raw_type)
+
+    if base_type.lower() == "oob":
+        return _OOB_OSCI_CLASS
 
     if module == "Brute Force" or base_type.startswith("BF-"):
         return _BRUTEFORCE_CLASS

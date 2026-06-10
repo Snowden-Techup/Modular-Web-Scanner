@@ -900,6 +900,8 @@
                 <option value="all">all (bruteforce 제외)</option>
                 <option value="sqli">sqli</option>
                 <option value="osci">osci</option>
+                <option value="oob_sqli">oob_sqli</option>
+                <option value="oob_osci">oob_osci</option>
                 <option value="bruteforce">bruteforce</option>
                 <option value="lfi">lfi</option>
                 <option value="file_upload">file_upload</option>
@@ -907,7 +909,6 @@
                 <option value="stored_xss">stored_xss</option>
                 <option value="reflected_xss">reflected_xss</option>
                 <option value="ssti">ssti</option>
-                <option value="oob">oob test</option>
               </select>
             </div>
             <div class="mt-3">
@@ -1287,32 +1288,6 @@
             </div>
             </div>
 
-            <div id="detailPanelOob" class="module-detail-panel" hidden>
-            <div class="row g-2 mb-3">
-              <div class="col-12 hint">OOB test (고정 페이로드 1종)</div>
-              <div class="col-12">
-                <label class="form-label">전송 페이로드 형식</label>
-                <input type="text" class="form-control" value="http://3.34.47.231/c/{랜덤 32자 hex}" readonly>
-              </div>
-              <div class="col-md-6">
-                <label class="form-label" for="oob_server">OAST 서버 URL (폴링용)</label>
-                <input id="oob_server" type="url" class="form-control" value="http://3.34.47.231" placeholder="http://3.34.47.231">
-                <div class="field-help">/api/check/{token} 확인 API 베이스 URL</div>
-              </div>
-              <div class="col-md-2">
-                <label class="form-label" for="oob_retries">폴링 횟수</label>
-                <input id="oob_retries" type="number" class="form-control" min="1" max="20" value="3">
-              </div>
-              <div class="col-md-2">
-                <label class="form-label" for="oob_poll_delay">폴링 간격(초)</label>
-                <input id="oob_poll_delay" type="number" class="form-control" min="1" max="120" step="0.5" value="5">
-              </div>
-              <div class="col-md-2">
-                <label class="form-label" for="oob_poll_timeout">API 타임아웃(초)</label>
-                <input id="oob_poll_timeout" type="number" class="form-control" min="1" max="60" step="0.5" value="10">
-              </div>
-            </div>
-            </div>
           </div>
         </div>
         </div>
@@ -1668,15 +1643,14 @@
 
     function syncModuleDetailPanels() {
       const t = scanTypeSelect.value;
-      const showSqli = t === "all" || t === "sqli";
-      const showOsci = t === "all" || t === "osci";
+      const showSqli = t === "all" || t === "sqli" || t === "oob_sqli";
+      const showOsci = t === "all" || t === "osci" || t === "oob_osci";
       const showBf = t === "bruteforce";
       const showSsrf = t === "all" || t === "ssrf";
       const showSxss = t === "all" || t === "stored_xss";
       const showRxss = t === "all" || t === "reflected_xss";
       const showSsti = t === "all" || t === "ssti";
-      const showOob = t === "oob";
-      const any = showSqli || showOsci || showBf || showSsrf || showSxss || showRxss || showSsti || showOob;
+      const any = showSqli || showOsci || showBf || showSsrf || showSxss || showRxss || showSsti;
 
       detailPanelSqli.hidden = !showSqli;
       detailPanelOsci.hidden = !showOsci;
@@ -1685,29 +1659,20 @@
       detailPanelSxss.hidden = !showSxss;
       detailPanelRxss.hidden = !showRxss;
       detailPanelSsti.hidden = !showSsti;
-      detailPanelOob.hidden = !showOob;
       moduleDetailSection.hidden = !any;
 
       const labels = [];
-      if (showSqli) labels.push("SQLi");
-      if (showOsci) labels.push("OSCi");
+      if (showSqli) labels.push(t === "oob_sqli" ? "OOB SQLi" : "SQLi");
+      if (showOsci) labels.push(t === "oob_osci" ? "OOB OSCi" : "OSCi");
       if (showBf) labels.push("Bruteforce");
       if (showSsrf) labels.push("SSRF");
       if (showSxss) labels.push("Stored XSS");
       if (showRxss) labels.push("Reflected XSS");
       if (showSsti) labels.push("SSTI");
-      if (showOob) labels.push("OOB test");
       moduleDetailHint.textContent = labels.length ? labels.join(" · ") : "";
     }
 
-    scanTypeSelect.addEventListener("change", () => {
-      syncModuleDetailPanels();
-      if (scanTypeSelect.value === "oob") {
-        advancedWrap.classList.add("open");
-        advancedToggle.setAttribute("aria-expanded", "true");
-        advancedToggle.textContent = "상세 옵션 닫기 (선택 입력)";
-      }
-    });
+    scanTypeSelect.addEventListener("change", syncModuleDetailPanels);
     syncModuleDetailPanels();
 
     document.getElementById("level").addEventListener("input", () => {
@@ -1754,6 +1719,21 @@
     /* ── 취약점 렌더링 헬퍼 ── */
     function isGroupedFormat(vulns) {
       return vulns.length > 0 && "attack_type" in vulns[0];
+    }
+
+    function dedupeFlatFindings(items) {
+      const seen = new Set();
+      const out = [];
+      for (const item of items) {
+        const url = item.target?.url || item.url || "";
+        const param = item.target?.parameter || item.parameter || "";
+        const type = String(item.attack_info?.type || item.type || "Unknown").toLowerCase();
+        const key = `${url}\0${param}\0${type}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+      }
+      return out;
     }
 
     let _guideCounter = 0;
@@ -1897,7 +1877,7 @@
         return;
       }
 
-      const items = rawFindings.length > 0 ? rawFindings : reportVulns;
+      const items = dedupeFlatFindings(rawFindings.length > 0 ? rawFindings : reportVulns);
       if (!items.length) {
         applyFindingCount(scanDone ? 0 : null);
         findingList.innerHTML = scanRunning
@@ -2080,30 +2060,8 @@
         },
         ssti: {
           max_payloads: toInt("ssti_max_payloads", 0)
-        },
-        oob: {
-          oob_server: normalizeOobServerInput(
-            document.getElementById("oob_server").value,
-            "http://3.34.47.231"
-          ),
-          oob_retries: toInt("oob_retries", 3),
-          oob_poll_delay: parseFloat(document.getElementById("oob_poll_delay").value) || 5.0,
-          oob_poll_timeout: parseFloat(document.getElementById("oob_poll_timeout").value) || 10.0
         }
       };
-    }
-
-    const LEGACY_OAST_PREFIXES = ["http://15.164.99.243", "15.164.99.243"];
-
-    function normalizeOobServerInput(raw, fallback) {
-      const v = String(raw || "").trim();
-      if (!v) return fallback;
-      const low = v.toLowerCase().replace(/\/$/, "");
-      for (const prefix of LEGACY_OAST_PREFIXES) {
-        const p = prefix.toLowerCase();
-        if (low === p || low.startsWith(`${p}/`)) return fallback;
-      }
-      return v;
     }
 
     async function requestJson(url, options = {}) {
@@ -2123,20 +2081,6 @@
       return data;
     }
 
-    async function applySchemaDefaults() {
-      try {
-        const schema = await requestJson("/api/schema");
-        const d = schema.defaults || {};
-        const oobEl = document.getElementById("oob_server");
-        if (oobEl && d.oob_server) {
-          oobEl.value = normalizeOobServerInput(oobEl.value, d.oob_server);
-        }
-      } catch (_) {
-        /* schema optional */
-      }
-    }
-
-    applySchemaDefaults();
     renderAuthState();
 
     openLoginBtn.addEventListener("click", () => openLoginModal());

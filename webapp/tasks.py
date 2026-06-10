@@ -13,11 +13,18 @@ from pathlib import Path
 from webapp.celery_app import celery_app
 from webapp.db_service import (
     append_scan_log,
+    build_oob_report_json,
+    bulk_save_oob_tokens,
+    dedupe_finding_dicts,
+    findings_from_rows,
     get_scan_by_public_id,
+    get_scan_findings_rows,
     get_scan_pk,
     replace_scan_findings,
     update_scan_fields,
 )
+
+OOB_WEB_SCAN_TYPES = frozenset({"oob_sqli", "oob_osci"})
 
 
 # ─────────────────────────────────────────
@@ -80,7 +87,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     sxss = payload.get("stored_xss", {})
     rxss = payload.get("reflected_xss", {})
     ssti = payload.get("ssti", {})
-    oob = payload.get("oob", {})
 
     level = int(payload.get("level", 1))
     bf_min = int(bf.get("bf_min_length", 1))
@@ -91,9 +97,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
             bf_min, bf_max = parse_bf_length(bf_length_str, bf_max)
         except ValueError:
             pass
-
-    from modules.oob.client import DEFAULT_OAST_SERVER_URL, normalize_oast_server_url
-    oob_server_raw = oob.get("oob_server", DEFAULT_OAST_SERVER_URL) or DEFAULT_OAST_SERVER_URL
 
     raw_url = (payload.get("url") or payload.get("target_url") or "").strip()
     scan_url = raw_url.rstrip("/") if raw_url else ""
@@ -169,10 +172,6 @@ def _build_args_from_payload(payload: dict) -> Namespace:
             if int(ssti.get("max_payloads", 0) or 0) > 0
             else None
         ),
-        oob_server=normalize_oast_server_url(oob_server_raw),
-        oob_retries=int(oob.get("oob_retries", 3)),
-        oob_poll_delay=float(oob.get("oob_poll_delay", 5.0)),
-        oob_poll_timeout=float(oob.get("oob_poll_timeout", 10.0)),
     )
 
 
@@ -195,7 +194,16 @@ def _serialize_findings(findings) -> list[dict]:
             "type": attack_type,
             "payload": payload_value,
         })
-    return result
+    return dedupe_finding_dicts(result)
+
+
+def _pipeline_persisted_findings(scan_pk: int | None, all_findings: list) -> list[dict]:
+    """Engine findings + OOB webhook rows already in DB (deduped)."""
+    combined = _serialize_findings(all_findings)
+    if scan_pk is None:
+        return combined
+    db_flat = findings_from_rows(get_scan_findings_rows(scan_pk))
+    return dedupe_finding_dicts(combined + db_flat)
 
 
 SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
@@ -221,18 +229,25 @@ def _persist_pipeline_partial_report(
     all_findings: list,
     merged_stats,
     summary: dict,
+    pipeline_has_oob: bool = False,
 ) -> None:
     """모듈 완료 직후 누적 리포트를 파일·DB에 반영 (다음 모듈 시작 전)."""
     from reporter import ReportGenerator
 
-    reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
-    report_json = reporter.build_deduped_report()
-    reporter.export_to_json(str(runtime_output))
-
     scan_pk = get_scan_pk(scan_id)
+    combined = _pipeline_persisted_findings(scan_pk, all_findings)
     if scan_pk is not None:
-        replace_scan_findings(scan_pk, _serialize_findings(all_findings))
+        replace_scan_findings(scan_pk, combined)
 
+    reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
+    if pipeline_has_oob and scan_pk is not None:
+        scan_row = get_scan_by_public_id(scan_id)
+        rows = get_scan_findings_rows(scan_pk)
+        report_json = build_oob_report_json(scan_row, rows) if scan_row else reporter.build_deduped_report()
+    else:
+        report_json = reporter.build_deduped_report()
+
+    reporter.export_to_json(str(runtime_output))
     update_scan_fields(scan_id, report_json=report_json, summary=summary)
 
 
@@ -246,6 +261,7 @@ async def _flush_pipeline_partial_report(
     module_type: str,
     module_run_idx: int,
     n_modules: int,
+    pipeline_has_oob: bool = False,
 ) -> None:
     await asyncio.to_thread(
         _persist_pipeline_partial_report,
@@ -254,6 +270,7 @@ async def _flush_pipeline_partial_report(
         all_findings=all_findings,
         merged_stats=merged_stats,
         summary=summary,
+        pipeline_has_oob=pipeline_has_oob,
     )
     await _scan_log(
         scan_id,
@@ -307,6 +324,7 @@ async def _async_run_scan_pipeline(
 
     # ── 1. 전체 예상 요청 수 사전 계산 (진행바 분모) ─────────────────────────
     pipeline_types = pipeline_module_types(args)
+    pipeline_has_oob = bool(set(pipeline_types) & OOB_WEB_SCAN_TYPES)
     module_totals: dict[str, int] = {}
     for mtype in pipeline_types:
         mod_args = copy.copy(args)
@@ -342,6 +360,7 @@ async def _async_run_scan_pipeline(
 
     # ── 2. 모듈별 순차 실행 ───────────────────────────────────────────────────
     all_findings: list = []
+    all_pipeline_modules: list = []
     merged_stats = EngineStats(queued=0, completed=0, failures=0, findings=0)
     cumulative_completed = 0
     cumulative_findings = 0
@@ -408,6 +427,12 @@ async def _async_run_scan_pipeline(
                 progress_pct = max(last_shown_progress, raw_pct)
                 last_shown_progress = progress_pct
 
+                findings_count = cumulative_findings + engine.stats.findings
+                if module_type in OOB_WEB_SCAN_TYPES:
+                    scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                    if scan_row and scan_row.summary:
+                        findings_count = int(scan_row.summary.get("findings", findings_count))
+
                 summary = {
                     "phase": "fuzzing",
                     "current_module": module_type,
@@ -416,7 +441,7 @@ async def _async_run_scan_pipeline(
                     "queued": overall_total,
                     "completed": current_completed,
                     "failures": merged_stats.failures + engine.stats.failures,
-                    "findings": cumulative_findings + engine.stats.findings,
+                    "findings": findings_count,
                     "elapsed_time": round(time.monotonic() - started_at, 2),
                     "total_requests": overall_total,
                     "planned_requests": overall_total,
@@ -458,12 +483,17 @@ async def _async_run_scan_pipeline(
             )
 
             all_findings.extend(engine.findings)
+            all_pipeline_modules.extend(context["modules"])
             cumulative_completed += stats.completed
-            cumulative_findings += stats.findings
+            if module_type in OOB_WEB_SCAN_TYPES:
+                scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                cumulative_findings = int((scan_row.summary or {}).get("findings", cumulative_findings))
+            else:
+                cumulative_findings += stats.findings
             merged_stats.queued += stats.queued
             merged_stats.completed += stats.completed
             merged_stats.failures += stats.failures
-            merged_stats.findings += stats.findings
+            merged_stats.findings = cumulative_findings
 
             partial_summary = {
                 "phase": "fuzzing",
@@ -487,6 +517,7 @@ async def _async_run_scan_pipeline(
                 module_type=module_type,
                 module_run_idx=module_run_idx,
                 n_modules=n_modules,
+                pipeline_has_oob=pipeline_has_oob,
             )
 
     # ── 3. 최종 합산 리포트 저장 ──────────────────────────────────────────────
@@ -522,7 +553,22 @@ async def _async_run_scan_pipeline(
     except (OSError, json.JSONDecodeError) as exc:
         await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
-    findings = _serialize_findings(all_findings)
+    findings = _pipeline_persisted_findings(
+        await asyncio.to_thread(get_scan_pk, scan_id),
+        all_findings,
+    )
+    merged_stats.findings = len(findings)
+    if pipeline_has_oob:
+        scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
+        if scan_pk is not None:
+            def _build_pipeline_oob_report() -> dict:
+                scan_row = get_scan_by_public_id(scan_id)
+                if scan_row is None:
+                    return {}
+                rows = get_scan_findings_rows(scan_pk)
+                return build_oob_report_json(scan_row, rows)
+
+            report_json = await asyncio.to_thread(_build_pipeline_oob_report)
     final_total = max(overall_total, merged_stats.queued, merged_stats.completed, 1)
     await _scan_update(
         scan_id,
@@ -556,6 +602,26 @@ async def _async_run_scan_pipeline(
     scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
         await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
+
+    # webhook 모드에서 발급한 OOB 토큰을 DB에 일괄 저장 (Redis TTL 만료 시 fallback용)
+    all_issued_tokens = [
+        item for m in all_pipeline_modules
+        if hasattr(m, "generated_tokens")
+        for item in m.generated_tokens
+        if item.get("token", "").startswith("w")
+    ]
+    if all_issued_tokens:
+        try:
+            inserted = await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+            await _scan_log(
+                scan_id,
+                f"[OOB] {inserted}/{len(all_issued_tokens)}개 토큰을 DB에 저장",
+            )
+        except Exception as exc:
+            await _scan_log(
+                scan_id,
+                f"[OOB] 토큰 DB 저장 실패 (스캔 결과는 유지): {exc}",
+            )
 
     await _scan_log(scan_id, "[Celery/Pipeline] 스캔 완료")
 
@@ -608,9 +674,6 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             f"url={args.login_url}, user={args.username_field}, "
             f"csrf={args.csrf_field or '(없음)'}, submit={args.submit_field or '(없음)'}",
         )
-
-    if args.type == "oob":
-        await _scan_log(scan_id, f"OAST 서버: {args.oob_server}")
 
     cookies = parse_cookies(args.cookie) if args.cookie else {}
     await _scan_log(scan_id, "공격면 수집 시작")
@@ -690,12 +753,18 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             progress_pct = max(last_shown_progress, raw_progress_pct)
             last_shown_progress = progress_pct
 
+            findings_count = engine.stats.findings
+            if args.type in OOB_WEB_SCAN_TYPES:
+                scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                if scan_row and scan_row.summary:
+                    findings_count = int(scan_row.summary.get("findings", findings_count))
+
             summary = {
                 "phase": "fuzzing",
                 "queued": queued_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
-                "findings": engine.stats.findings,
+                "findings": findings_count,
                 "elapsed_time": round(time.monotonic() - started_at, 2),
                 "total_requests": effective_total,
                 "planned_requests": total_requests,
@@ -716,7 +785,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 await _scan_log(
                     scan_id,
                     f"진행률 {progress_pct}% (completed={engine.stats.completed}, "
-                    f"findings={engine.stats.findings}, failures={engine.stats.failures})",
+                    f"findings={findings_count}, failures={engine.stats.failures})",
                 )
                 last_logged_progress = progress_pct
 
@@ -732,9 +801,35 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             await asyncio.sleep(0.3)
 
         stats = await scan_task
-    reporter = ReportGenerator(stats=stats, findings=engine.findings)
-    await asyncio.to_thread(reporter.export_to_json, args.output)
-    await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
+
+    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
+    is_oob_web_scan = args.type in OOB_WEB_SCAN_TYPES
+
+    if is_oob_web_scan and scan_pk is not None:
+        def _build_oob_report() -> dict:
+            scan_row = get_scan_by_public_id(scan_id)
+            if scan_row is None:
+                return {}
+            rows = get_scan_findings_rows(scan_pk)
+            return build_oob_report_json(scan_row, rows)
+
+        report_json = await asyncio.to_thread(_build_oob_report)
+
+        def _write_report() -> None:
+            with open(args.output, "w", encoding="utf-8") as fp:
+                json.dump(report_json, fp, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(_write_report)
+        await _scan_log(scan_id, f"OOB 리포트 파일 저장: {args.output}")
+        findings = findings_from_rows(await asyncio.to_thread(get_scan_findings_rows, scan_pk))
+        deduped_findings_count = report_json["metadata"]["summary"]["findings_deduped"]
+    else:
+        reporter = ReportGenerator(stats=stats, findings=engine.findings)
+        await asyncio.to_thread(reporter.export_to_json, args.output)
+        await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
+        report_json = None
+        findings = _serialize_findings(engine.findings)
+        deduped_findings_count = len(findings)
 
     archived_output = _archive_scan_report_path(scan_id)
     archived_output.parent.mkdir(parents=True, exist_ok=True)
@@ -758,17 +853,16 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     except OSError as exc:
         await _scan_log(scan_id, f"디버깅 리포트 갱신 실패: {exc}")
 
-    report_json = None
-    try:
-        def _load_report() -> dict:
-            with open(archived_output, "r", encoding="utf-8") as fp:
-                return json.load(fp)
+    if report_json is None:
+        try:
+            def _load_report() -> dict:
+                with open(archived_output, "r", encoding="utf-8") as fp:
+                    return json.load(fp)
 
-        report_json = await asyncio.to_thread(_load_report)
-    except (OSError, json.JSONDecodeError) as exc:
-        await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
+            report_json = await asyncio.to_thread(_load_report)
+        except (OSError, json.JSONDecodeError) as exc:
+            await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
-    findings = _serialize_findings(engine.findings)
     final_total = max(total_requests, stats.queued, stats.completed, 1)
     await _scan_update(
         scan_id,
@@ -780,7 +874,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
             "queued": stats.queued,
             "completed": stats.completed,
             "failures": stats.failures,
-            "findings": stats.findings,
+            "findings": deduped_findings_count,
             "elapsed_time": round(time.monotonic() - started_at, 2),
             "total_requests": final_total,
             "planned_requests": total_requests,
@@ -790,7 +884,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
                 "target": args.url,
                 "scan_type": args.type,
                 "total_requests": stats.completed,
-                "findings": len(findings),
+                "findings": deduped_findings_count,
                 "output": str(archived_output),
             }
         },
@@ -798,9 +892,28 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         error=None,
     )
 
-    scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
     if scan_pk is not None:
         await asyncio.to_thread(replace_scan_findings, scan_pk, findings)
+
+    # webhook 모드에서 발급한 OOB 토큰을 DB에 일괄 저장 (Redis TTL 만료 시 fallback용)
+    all_issued_tokens = [
+        item for m in context["modules"]
+        if hasattr(m, "generated_tokens")
+        for item in m.generated_tokens
+        if item.get("token", "").startswith("w")
+    ]
+    if all_issued_tokens:
+        try:
+            inserted = await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+            await _scan_log(
+                scan_id,
+                f"[OOB] {inserted}/{len(all_issued_tokens)}개 토큰을 DB에 저장",
+            )
+        except Exception as exc:
+            await _scan_log(
+                scan_id,
+                f"[OOB] 토큰 DB 저장 실패 (스캔 결과는 유지): {exc}",
+            )
 
     await _scan_log(scan_id, "[Celery] 스캔 완료")
 

@@ -15,8 +15,6 @@ from modules.ssrf.module import SSRFModule
 from modules.stored_xss.module import StoredXSSModule
 from modules.reflected_xss.module import ReflectedXSSModule
 from modules.ssti.module import SSTIModule
-from modules.oob.client import OASTClient, normalize_oast_server_url
-from modules.oob.module import OOBModule
 from modules.oob_osci.module import OOB_OSCiModule
 from modules.oob_sqli.module import OOB_SQLiModule
 
@@ -29,13 +27,22 @@ def _oob_mode() -> str:
     return "webhook" if is_saas_mode else "polling"
 
 
+def _oob_module_kwargs(args) -> dict:
+    return {
+        "scan_id": getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED"),
+        "oob_domain": getattr(args, "oob_domain", None) or os.getenv("OOB_DOMAIN", "oob.snowden.kr"),
+        "redis_url": getattr(args, "redis_url", None) or os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        "oob_mode": _oob_mode(),
+    }
+
+
 def _module_defs(args) -> list[_ModuleDef]:
     """
     `-t all` 파이프라인 순서 = 아래 목록 순서.
-    sqli 는 의도적으로 맨 마지막에 실행한다.
-    oob / oob_osci / oob_sqli 는 파이프라인 제외 (select_modules 특수 분기).
+    sqli / oob_sqli 는 의도적으로 맨 마지막에 실행한다.
     새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
     """
+    oob_kwargs = _oob_module_kwargs(args)
     return [
         (
             "osci",
@@ -45,6 +52,15 @@ def _module_defs(args) -> list[_ModuleDef]:
                 max_time_payloads=args.osci_time_max,
                 evasion_level=args.osci_evasion_level,
                 target_os=args.target_os,
+            ),
+        ),
+        (
+            "oob_osci",
+            ("oob_osci", "all"),
+            lambda: OOB_OSCiModule(
+                target_os=args.target_os,
+                evasion_level=args.osci_evasion_level,
+                **oob_kwargs,
             ),
         ),
         (
@@ -101,6 +117,15 @@ def _module_defs(args) -> list[_ModuleDef]:
                 target_dbms=args.target_dbms,
             ),
         ),
+        (
+            "oob_sqli",
+            ("oob_sqli", "all"),
+            lambda: OOB_SQLiModule(
+                target_dbms=args.target_dbms,
+                evasion_level=args.sqli_evasion_level,
+                **oob_kwargs,
+            ),
+        ),
     ]
 
 
@@ -134,45 +159,6 @@ def select_modules(args) -> list:
                 bf_target_param=args.bf_target_param,
             )
         )
-
-    if args.type == "oob":
-        oast_server = normalize_oast_server_url(getattr(args, "oob_server", "") or "")
-        oast_client = OASTClient(
-            oast_server,
-            poll_retries=getattr(args, "oob_retries", 3),
-            poll_delay=getattr(args, "oob_poll_delay", 5.0),
-            poll_timeout=getattr(args, "oob_poll_timeout", 10.0),
-        )
-        selected.append(OOBModule(oast_client=oast_client))
-        print(f"[*] OAST server: {oast_server}")
-
-    if args.type in ("oob_osci", "oob_sqli"):
-        current_scan_id = getattr(args, "scan_id", "ERROR_SCAN_ID_NOT_PASSED")
-        oob_domain = getattr(args, "oob_domain", None) or os.getenv("OOB_DOMAIN", "oob.snowden.kr")
-        redis_url = getattr(args, "redis_url", None) or os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        current_oob_mode = _oob_mode()
-        if args.type == "oob_osci":
-            selected.append(
-                OOB_OSCiModule(
-                    target_os=args.target_os,
-                    evasion_level=args.osci_evasion_level,
-                    scan_id=current_scan_id,
-                    oob_domain=oob_domain,
-                    redis_url=redis_url,
-                    oob_mode=current_oob_mode,
-                )
-            )
-        else:
-            selected.append(
-                OOB_SQLiModule(
-                    target_dbms=args.target_dbms,
-                    evasion_level=args.sqli_evasion_level,
-                    scan_id=current_scan_id,
-                    oob_domain=oob_domain,
-                    redis_url=redis_url,
-                    oob_mode=current_oob_mode,
-                )
-            )
 
     return selected
 
