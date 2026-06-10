@@ -892,6 +892,10 @@ async def interact_and_submit(engine, page) -> None:
             await page.wait_for_timeout(1500)
 
             if page.url != original_url:
+                from crawler.spa.dom_form_capture import register_route_query_params_from_url
+
+                register_route_query_params_from_url(engine, page.url)
+                await page.wait_for_timeout(500)
                 await page.goto(original_url, wait_until="domcontentloaded", timeout=engine.timeout)
                 await page.wait_for_timeout(1000)
 
@@ -905,6 +909,10 @@ async def interact_and_submit(engine, page) -> None:
                     await btn.click(timeout=1500)
                     await page.wait_for_timeout(1500)  # 버튼 누른 후에도 1.5초 통신 대기
                     if page.url != original_url:
+                        from crawler.spa.dom_form_capture import register_route_query_params_from_url
+
+                        register_route_query_params_from_url(engine, page.url)
+                        await page.wait_for_timeout(500)
                         await page.goto(original_url, wait_until="domcontentloaded", timeout=engine.timeout)
                         await page.wait_for_timeout(1000)
                         break
