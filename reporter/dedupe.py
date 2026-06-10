@@ -35,6 +35,43 @@ _LFI_REPORT_TYPES = frozenset(
     }
 )
 
+# SSRF payload attack_type values (config/payloads/ssrf/*). Used when module/ssrf_channel
+# are missing from flat DB rows so bypass_ipv6, file_read, etc. still group as SSRF-Internal.
+_SSRF_ATTACK_TYPES = frozenset(
+    {
+        "basic",
+        "bypass_cidr",
+        "bypass_decimal",
+        "bypass_domain",
+        "bypass_encoding",
+        "bypass_ipv6",
+        "bypass_ipv6_hostname",
+        "bypass_octal",
+        "bypass_rare",
+        "bypass_unicode",
+        "cloud_api",
+        "cloud_bypass",
+        "cloud_metadata",
+        "cloud_redirect",
+        "cloud_runtime",
+        "dns_rebinding",
+        "docker_api",
+        "file_read",
+        "http_probe",
+        "jar_scheme",
+        "k8s_etcd",
+        "oob_candidate",
+        "parser_confusion",
+        "php_filter_bypass",
+        "protocol_smuggling",
+        "rancher_metadata",
+        "redirect_bypass",
+        "time_blind",
+        "upgrade_to_xss",
+        "verify_probe",
+    }
+)
+
 
 def severity_rank(raw: str) -> int:
     """Lower is more severe (critical first)."""
@@ -88,12 +125,23 @@ def _raw_attack_type(record: dict[str, Any]) -> str:
     return str(attack.get("type") or "").strip()
 
 
+def _canonical_ssrf_attack_base(record: dict[str, Any]) -> str:
+    return canonical_attack_type_for_grouping(_raw_attack_type(record))
+
+
+def _is_ssrf_by_attack_type(record: dict[str, Any]) -> bool:
+    return _canonical_ssrf_attack_base(record) in _SSRF_ATTACK_TYPES
+
+
 def _is_ssrf_record(record: dict[str, Any]) -> bool:
-    return _module_name(record) == SSRF_MODULE_REPORT_NAME
+    return _module_name(record) == SSRF_MODULE_REPORT_NAME or _is_ssrf_by_attack_type(record)
 
 
 def _is_oob_ssrf_record(record: dict[str, Any]) -> bool:
-    return record.get("ssrf_channel") == "oob"
+    if record.get("ssrf_channel") == "oob":
+        return True
+    # OOB-only payload labels when channel metadata was not persisted (e.g. flat DB rows).
+    return _canonical_ssrf_attack_base(record) in {"upgrade_to_xss", "cloud_redirect"}
 
 
 def _is_inband_ssrf_record(record: dict[str, Any]) -> bool:
@@ -215,7 +263,7 @@ def presentation_for_vulnerability_record(record: dict[str, Any]) -> dict[str, A
         attack["type"] = report_type
     if original and report_type and original != report_type:
         attack["attack_variant"] = original
-        if _is_ssrf_record(out):
+        if _is_ssrf_record(out) or _is_ssrf_by_attack_type(out):
             attack["ssrf_variant"] = original
     return out
 
