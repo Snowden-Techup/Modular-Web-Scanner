@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
-from crawler.spa.capture_core import path_key_from_url, register_observed_body_field_hints
+from crawler.spa.capture_core import (
+    dom_fields_should_map_to_query,
+    path_key_from_url,
+    register_observed_body_field_hints,
+    register_observed_query_fields,
+)
 from parsers.body_field_inference import sanitize_field_map
 
 logger = logging.getLogger(__name__)
@@ -186,6 +191,64 @@ async def extract_visible_form_fields(page) -> tuple[dict[str, str], dict[str, s
     return _normalize_dom_capture(raw)
 
 
+def _route_api_path_keys_related(route_key: str, route_path: str, api_key: str, source_url: str) -> bool:
+    source_key = path_key_from_url(source_url) if source_url.startswith("http") else source_url
+    if route_key and (route_key in api_key or api_key.endswith(route_key)):
+        return True
+    if route_path and source_url:
+        src_path = (urlparse(source_url).path or "").rstrip("/").lower()
+        if src_path == route_path or route_path in src_path or src_path in route_path:
+            return True
+    if route_key and source_key and (route_key in source_key or source_key in route_key):
+        return True
+    if route_key.startswith("/api/") and route_key[4:] == api_key:
+        return True
+    if api_key.startswith("/api/") and api_key[4:] == route_key:
+        return True
+    return False
+
+
+def _conventional_api_path_for_ui_route(route_path: str) -> str:
+    """UI 경로 /foo → 관례적 API 경로 /api/foo (범용 SPA 패턴)."""
+    normalized = (route_path or "").rstrip("/").lower()
+    if not normalized or normalized.startswith("/api/"):
+        return ""
+    return f"/api{normalized}"
+
+
+def register_route_query_params_from_url(engine, route_url: str) -> int:
+    """
+    클라이언트 라우팅으로 URL 쿼리가 붙은 경우(예: navigate('/page?x=1')),
+    UI 경로 및 관련 API path_key에 쿼리 샘플을 등록한다.
+    """
+    parsed = urlparse(route_url)
+    if not parsed.query:
+        return 0
+    fields = {
+        str(k).strip(): str(v)[:500]
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if str(k).strip()
+    }
+    if not fields:
+        return 0
+
+    route_key = path_key_from_url(route_url)
+    route_path = (parsed.path or "").rstrip("/").lower()
+    updated = register_observed_query_fields(engine, route_key, fields)
+
+    api_path = _conventional_api_path_for_ui_route(route_path)
+    if api_path:
+        updated += register_observed_query_fields(engine, api_path, fields)
+
+    for entry in getattr(engine, "api_endpoints", {}).values():
+        api_key = path_key_from_url(str(entry.get("url") or ""))
+        source_url = str(entry.get("source_url") or "")
+        if _route_api_path_keys_related(route_key, route_path, api_key, source_url):
+            updated += register_observed_query_fields(engine, api_key, fields)
+
+    return updated
+
+
 def register_dom_fields_for_route(
     engine,
     route_url: str,
@@ -195,26 +258,30 @@ def register_dom_fields_for_route(
 ) -> int:
     """
     현재 클라이언트 라우트의 input/textarea name을 관련 API path_key에 병합.
-    React controlled form은 XHR 전까지 body 샘플이 비는 경우가 많다.
+    읽기 전용 GET API는 body 대신 query 샘플로 매핑한다.
     """
     fields = sanitize_field_map(fields, label_hints=label_hints)
     if not fields:
         return 0
 
-    samples_map = getattr(engine, "observed_body_samples", None)
-    if samples_map is None:
+    body_samples_map = getattr(engine, "observed_body_samples", None)
+    if body_samples_map is None:
         engine.observed_body_samples = {}
-        samples_map = engine.observed_body_samples
+        body_samples_map = engine.observed_body_samples
+    dom_body_keys = getattr(engine, "dom_inferred_body_path_keys", None)
+    if dom_body_keys is None:
+        engine.dom_inferred_body_path_keys = set()
+        dom_body_keys = engine.dom_inferred_body_path_keys
 
     route_key = path_key_from_url(route_url)
     route_path = (urlparse(route_url).path or "").rstrip("/").lower()
     updated = 0
 
-    def merge_into(path_key: str) -> None:
+    def merge_into_body(path_key: str) -> None:
         nonlocal updated
         if not path_key:
             return
-        bucket = dict(samples_map.get(path_key) or {})
+        bucket = dict(body_samples_map.get(path_key) or {})
         before = len(bucket)
         for key, value in fields.items():
             key_str = str(key).strip()
@@ -223,34 +290,36 @@ def register_dom_fields_for_route(
             if key_str not in bucket or not str(bucket.get(key_str) or "").strip():
                 bucket[key_str] = str(value)
         if len(bucket) > before or (before == 0 and bucket):
-            samples_map[path_key] = sanitize_field_map(bucket, label_hints=label_hints)
+            body_samples_map[path_key] = sanitize_field_map(bucket, label_hints=label_hints)
+            dom_body_keys.add(path_key)
             updated += 1
         register_observed_body_field_hints(engine, path_key, fields.keys())
 
-    merge_into(route_key)
+    def merge_into_query(path_key: str) -> None:
+        nonlocal updated
+        if not path_key:
+            return
+        if register_observed_query_fields(engine, path_key, fields):
+            updated += 1
+
+    def merge_for_path(path_key: str) -> None:
+        if dom_fields_should_map_to_query(engine, path_key):
+            merge_into_query(path_key)
+        else:
+            merge_into_body(path_key)
+
+    merge_for_path(route_key)
+
+    api_path = _conventional_api_path_for_ui_route(route_path)
+    if api_path:
+        merge_for_path(api_path)
 
     for entry in getattr(engine, "api_endpoints", {}).values():
         api_url = str(entry.get("url") or "")
         api_key = path_key_from_url(api_url)
         source_url = str(entry.get("source_url") or "")
-        source_key = path_key_from_url(source_url) if source_url.startswith("http") else source_url
-
-        related = False
-        if route_key and (route_key in api_key or api_key.endswith(route_key)):
-            related = True
-        if route_path and source_url:
-            src_path = (urlparse(source_url).path or "").rstrip("/").lower()
-            if src_path == route_path or route_path in src_path or src_path in route_path:
-                related = True
-        if route_key and source_key and (route_key in source_key or source_key in route_key):
-            related = True
-        if route_key.startswith("/api/") and route_key[4:] == api_key:
-            related = True
-        if api_key.startswith("/api/") and api_key[4:] == route_key:
-            related = True
-
-        if related:
-            merge_into(api_key)
+        if _route_api_path_keys_related(route_key, route_path, api_key, source_url):
+            merge_for_path(api_key)
 
     return updated
 
