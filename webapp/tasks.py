@@ -566,8 +566,17 @@ async def _async_run_scan_pipeline(
         if item.get("token", "").startswith("w")
     ]
     if all_issued_tokens:
-        await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
-        await _scan_log(scan_id, f"[OOB] {len(all_issued_tokens)}개 토큰을 DB에 저장")
+        try:
+            inserted = await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+            await _scan_log(
+                scan_id,
+                f"[OOB] {inserted}/{len(all_issued_tokens)}개 토큰을 DB에 저장",
+            )
+        except Exception as exc:
+            await _scan_log(
+                scan_id,
+                f"[OOB] 토큰 DB 저장 실패 (스캔 결과는 유지): {exc}",
+            )
 
     await _scan_log(scan_id, "[Celery/Pipeline] 스캔 완료")
 
@@ -849,8 +858,17 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         if item.get("token", "").startswith("w")
     ]
     if all_issued_tokens:
-        await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
-        await _scan_log(scan_id, f"[OOB] {len(all_issued_tokens)}개 토큰을 DB에 저장")
+        try:
+            inserted = await asyncio.to_thread(bulk_save_oob_tokens, all_issued_tokens)
+            await _scan_log(
+                scan_id,
+                f"[OOB] {inserted}/{len(all_issued_tokens)}개 토큰을 DB에 저장",
+            )
+        except Exception as exc:
+            await _scan_log(
+                scan_id,
+                f"[OOB] 토큰 DB 저장 실패 (스캔 결과는 유지): {exc}",
+            )
 
     await _scan_log(scan_id, "[Celery] 스캔 완료")
 

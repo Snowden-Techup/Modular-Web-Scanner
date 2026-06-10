@@ -9,6 +9,8 @@ from webapp.database import SessionLocal
 from webapp.models import Finding, OOBIssuedToken, Scan, User
 
 MAX_SCAN_HISTORY_PER_USER = 10
+# psycopg/PostgreSQL bind parameter limit is 65535; keep IN batches well below that.
+_OOB_TOKEN_BATCH_SIZE = 2000
 
 
 def _ts(dt: datetime | None) -> float:
@@ -288,7 +290,24 @@ def update_scan_fields(scan_id: str, **fields) -> None:
         db.close()
 
 
-def bulk_save_oob_tokens(issued_tokens: list[dict]) -> None:
+def _oob_token_from_item(item: dict) -> OOBIssuedToken:
+    target = item.get("target", {})
+    attack_info = item.get("attack_info", {})
+    return OOBIssuedToken(
+        token=item["token"],
+        scan_id=item.get("scan_id", ""),
+        module_name=item.get("module_name"),
+        target_url=target.get("url"),
+        target_parameter=target.get("parameter"),
+        target_method=target.get("method"),
+        target_location=target.get("location"),
+        payload_value=attack_info.get("payload_value"),
+        attack_type=attack_info.get("type"),
+        risk_level=attack_info.get("risk_level"),
+    )
+
+
+def bulk_save_oob_tokens(issued_tokens: list[dict]) -> int:
     """
     Celery 스캔 완료 후 발급된 OOB 토큰 목록을 DB에 일괄 저장.
     이미 존재하는 토큰은 ON CONFLICT 처리 대신 개별 무시 처리.
@@ -301,37 +320,38 @@ def bulk_save_oob_tokens(issued_tokens: list[dict]) -> None:
         "target": {"url", "method", "location", "parameter"},
         "attack_info": {"payload_value", "type", "risk_level"}
     }
+
+    Returns the number of rows inserted.
     """
     if not issued_tokens:
-        return
+        return 0
+
+    inserted = 0
     db = SessionLocal()
     try:
-        existing = {
-            row.token
-            for row in db.query(OOBIssuedToken.token)
-            .filter(OOBIssuedToken.token.in_([t["token"] for t in issued_tokens]))
-            .all()
-        }
-        to_insert = [t for t in issued_tokens if t["token"] not in existing]
-        for item in to_insert:
-            target = item.get("target", {})
-            attack_info = item.get("attack_info", {})
-            db.add(OOBIssuedToken(
-                token=item["token"],
-                scan_id=item.get("scan_id", ""),
-                module_name=item.get("module_name"),
-                target_url=target.get("url"),
-                target_parameter=target.get("parameter"),
-                target_method=target.get("method"),
-                target_location=target.get("location"),
-                payload_value=attack_info.get("payload_value"),
-                attack_type=attack_info.get("type"),
-                risk_level=attack_info.get("risk_level"),
-            ))
-        if to_insert:
-            db.commit()
+        for offset in range(0, len(issued_tokens), _OOB_TOKEN_BATCH_SIZE):
+            chunk = issued_tokens[offset : offset + _OOB_TOKEN_BATCH_SIZE]
+            token_list = [t["token"] for t in chunk]
+            existing = {
+                row.token
+                for row in db.query(OOBIssuedToken.token)
+                .filter(OOBIssuedToken.token.in_(token_list))
+                .all()
+            }
+            batch_inserted = 0
+            for item in chunk:
+                if item["token"] in existing:
+                    continue
+                db.add(_oob_token_from_item(item))
+                batch_inserted += 1
+            if batch_inserted:
+                db.commit()
+                inserted += batch_inserted
+            else:
+                db.rollback()
     finally:
         db.close()
+    return inserted
 
 
 def get_oob_token_meta(token: str) -> OOBIssuedToken | None:
