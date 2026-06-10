@@ -197,6 +197,15 @@ def _serialize_findings(findings) -> list[dict]:
     return dedupe_finding_dicts(result)
 
 
+def _pipeline_persisted_findings(scan_pk: int | None, all_findings: list) -> list[dict]:
+    """Engine findings + OOB webhook rows already in DB (deduped)."""
+    combined = _serialize_findings(all_findings)
+    if scan_pk is None:
+        return combined
+    db_flat = findings_from_rows(get_scan_findings_rows(scan_pk))
+    return dedupe_finding_dicts(combined + db_flat)
+
+
 SCAN_LOG_EVERY_COMPLETED_BF_TRUE_RANDOM = 1000
 SCAN_REPORT_ARCHIVE_DIR = Path("report")
 SCAN_RUNTIME_REPORT_DIR = Path(".scan_reports")
@@ -220,18 +229,25 @@ def _persist_pipeline_partial_report(
     all_findings: list,
     merged_stats,
     summary: dict,
+    pipeline_has_oob: bool = False,
 ) -> None:
     """모듈 완료 직후 누적 리포트를 파일·DB에 반영 (다음 모듈 시작 전)."""
     from reporter import ReportGenerator
 
-    reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
-    report_json = reporter.build_deduped_report()
-    reporter.export_to_json(str(runtime_output))
-
     scan_pk = get_scan_pk(scan_id)
+    combined = _pipeline_persisted_findings(scan_pk, all_findings)
     if scan_pk is not None:
-        replace_scan_findings(scan_pk, _serialize_findings(all_findings))
+        replace_scan_findings(scan_pk, combined)
 
+    reporter = ReportGenerator(stats=merged_stats, findings=all_findings)
+    if pipeline_has_oob and scan_pk is not None:
+        scan_row = get_scan_by_public_id(scan_id)
+        rows = get_scan_findings_rows(scan_pk)
+        report_json = build_oob_report_json(scan_row, rows) if scan_row else reporter.build_deduped_report()
+    else:
+        report_json = reporter.build_deduped_report()
+
+    reporter.export_to_json(str(runtime_output))
     update_scan_fields(scan_id, report_json=report_json, summary=summary)
 
 
@@ -245,6 +261,7 @@ async def _flush_pipeline_partial_report(
     module_type: str,
     module_run_idx: int,
     n_modules: int,
+    pipeline_has_oob: bool = False,
 ) -> None:
     await asyncio.to_thread(
         _persist_pipeline_partial_report,
@@ -253,6 +270,7 @@ async def _flush_pipeline_partial_report(
         all_findings=all_findings,
         merged_stats=merged_stats,
         summary=summary,
+        pipeline_has_oob=pipeline_has_oob,
     )
     await _scan_log(
         scan_id,
@@ -306,6 +324,7 @@ async def _async_run_scan_pipeline(
 
     # ── 1. 전체 예상 요청 수 사전 계산 (진행바 분모) ─────────────────────────
     pipeline_types = pipeline_module_types(args)
+    pipeline_has_oob = bool(set(pipeline_types) & OOB_WEB_SCAN_TYPES)
     module_totals: dict[str, int] = {}
     for mtype in pipeline_types:
         mod_args = copy.copy(args)
@@ -408,6 +427,12 @@ async def _async_run_scan_pipeline(
                 progress_pct = max(last_shown_progress, raw_pct)
                 last_shown_progress = progress_pct
 
+                findings_count = cumulative_findings + engine.stats.findings
+                if module_type in OOB_WEB_SCAN_TYPES:
+                    scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                    if scan_row and scan_row.summary:
+                        findings_count = int(scan_row.summary.get("findings", findings_count))
+
                 summary = {
                     "phase": "fuzzing",
                     "current_module": module_type,
@@ -416,7 +441,7 @@ async def _async_run_scan_pipeline(
                     "queued": overall_total,
                     "completed": current_completed,
                     "failures": merged_stats.failures + engine.stats.failures,
-                    "findings": cumulative_findings + engine.stats.findings,
+                    "findings": findings_count,
                     "elapsed_time": round(time.monotonic() - started_at, 2),
                     "total_requests": overall_total,
                     "planned_requests": overall_total,
@@ -460,11 +485,15 @@ async def _async_run_scan_pipeline(
             all_findings.extend(engine.findings)
             all_pipeline_modules.extend(context["modules"])
             cumulative_completed += stats.completed
-            cumulative_findings += stats.findings
+            if module_type in OOB_WEB_SCAN_TYPES:
+                scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
+                cumulative_findings = int((scan_row.summary or {}).get("findings", cumulative_findings))
+            else:
+                cumulative_findings += stats.findings
             merged_stats.queued += stats.queued
             merged_stats.completed += stats.completed
             merged_stats.failures += stats.failures
-            merged_stats.findings += stats.findings
+            merged_stats.findings = cumulative_findings
 
             partial_summary = {
                 "phase": "fuzzing",
@@ -488,6 +517,7 @@ async def _async_run_scan_pipeline(
                 module_type=module_type,
                 module_run_idx=module_run_idx,
                 n_modules=n_modules,
+                pipeline_has_oob=pipeline_has_oob,
             )
 
     # ── 3. 최종 합산 리포트 저장 ──────────────────────────────────────────────
@@ -523,7 +553,22 @@ async def _async_run_scan_pipeline(
     except (OSError, json.JSONDecodeError) as exc:
         await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
-    findings = _serialize_findings(all_findings)
+    findings = _pipeline_persisted_findings(
+        await asyncio.to_thread(get_scan_pk, scan_id),
+        all_findings,
+    )
+    merged_stats.findings = len(findings)
+    if pipeline_has_oob:
+        scan_pk = await asyncio.to_thread(get_scan_pk, scan_id)
+        if scan_pk is not None:
+            def _build_pipeline_oob_report() -> dict:
+                scan_row = get_scan_by_public_id(scan_id)
+                if scan_row is None:
+                    return {}
+                rows = get_scan_findings_rows(scan_pk)
+                return build_oob_report_json(scan_row, rows)
+
+            report_json = await asyncio.to_thread(_build_pipeline_oob_report)
     final_total = max(overall_total, merged_stats.queued, merged_stats.completed, 1)
     await _scan_update(
         scan_id,
