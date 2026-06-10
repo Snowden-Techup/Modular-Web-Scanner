@@ -242,25 +242,43 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
 
     pipeline_types = pipeline_module_types(args)
 
+    module_totals: dict[str, int] = {}
+    for mtype in pipeline_types:
+        mod_args = copy.copy(args)
+        mod_args.type = mtype
+        mods = select_modules(mod_args)
+        if mods:
+            module_totals[mtype] = estimate_total_requests(surfaces, mods)
+    overall_total = max(1, sum(module_totals.values()))
+    n_modules = len([t for t in pipeline_types if module_totals.get(t, 0) > 0])
+    cumulative_completed = 0
+
     separator = "=" * 60
     print(f"\n{separator}")
-    print(f"Pipeline mode: {len(pipeline_types)} modules will run sequentially.")
+    print(f"Pipeline mode: {n_modules} modules will run sequentially.")
+    print(f"Estimated total requests: {overall_total}")
     print(f"Intermediate reports: {out_path.stem}_<module>{out_path.suffix}")
     print(f"Final merged report : {out_path.name}")
     print(separator)
 
     async with scan_auth_lifecycle(args, base_cookies=scan_cookies):
+        module_run_idx = 0
         for idx, module_type in enumerate(pipeline_types, 1):
             mod_args = copy.copy(args)
             mod_args.type = module_type
 
             context = prepare_scan_context(mod_args, surfaces)
-            if context is None:
+            if context is None or module_totals.get(module_type, 0) == 0:
                 print(f"\n[{idx}/{len(pipeline_types)}] {module_type}: skipped (no payloads/surfaces).")
                 continue
 
+            module_run_idx += 1
             print(f"\n{separator}")
-            print(f"[{idx}/{len(pipeline_types)}] Module: {module_type}  ({context['total_requests']} requests)")
+            print(
+                f"[{module_run_idx}/{n_modules}] Module: {module_type}  "
+                f"({context['total_requests']} requests, "
+                f"overall {cumulative_completed}/{overall_total})"
+            )
             print(separator)
 
             engine = FuzzerEngine(
@@ -279,10 +297,18 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
                 )
             )
             progress_task = asyncio.create_task(
-                progress_printer(engine, context["total_requests"], scan_task)
+                progress_printer(
+                    engine,
+                    context["total_requests"],
+                    scan_task,
+                    overall_total=overall_total,
+                    baseline_completed=cumulative_completed,
+                    label=f"[{module_run_idx}/{n_modules} {module_type}]",
+                )
             )
             stats = await scan_task
             await progress_task
+            cumulative_completed += stats.completed
 
             # 모듈별 중간 리포트 저장
             module_output = out_path.with_name(

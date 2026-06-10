@@ -1529,17 +1529,19 @@
 
     function resolveScanPhase(scan) {
       const phase = scan.summary?.phase;
+      const sum = scan.summary || {};
       if (phase === "crawling") return "crawling";
       if (phase === "queued" || scan.status === "queued") return "queued";
+      if (phase === "fuzzing") return "fuzzing";
       if (
-        scan.status === "running"
-        && scan.summary?.phase !== "fuzzing"
-        && !scan.total_requests
-        && Number(scan.summary?.completed ?? 0) === 0
-        && !(typeof scan.progress_percent === "number" && scan.progress_percent > 0)
+        Number(sum.module_index ?? 0) > 0
+        || Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
+        || Number(sum.completed ?? 0) > 0
+        || (typeof scan.progress_percent === "number" && scan.progress_percent > 0)
       ) {
-        return "crawling";
+        return "fuzzing";
       }
+      if (scan.status === "running") return "crawling";
       return phase || scan.status || "";
     }
 
@@ -1958,6 +1960,15 @@
       renderScanHistoryList();
       try {
         const data = await requestJson(`/api/scan/${scanId}`);
+        if (data.status === "running" || data.status === "queued") {
+          displayedProgressPercent = Math.max(
+            displayedProgressPercent,
+            Number(data.progress_percent ?? data.progress ?? 0) || 0
+          );
+        } else {
+          displayedProgressPercent = data.status === "completed" ? 100 : 0;
+        }
+        updateScanProgressUI(data);
         renderReport(data);
       } catch (err) {
         findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;

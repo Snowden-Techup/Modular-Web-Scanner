@@ -248,7 +248,12 @@ def _persist_pipeline_partial_report(
         report_json = reporter.build_deduped_report()
 
     reporter.export_to_json(str(runtime_output))
-    update_scan_fields(scan_id, report_json=report_json, summary=summary)
+    scan_row = get_scan_by_public_id(scan_id)
+    fields: dict = {"report_json": report_json, "summary": summary}
+    if scan_row is not None:
+        fields["progress_percent"] = scan_row.progress_percent
+        fields["progress"] = scan_row.progress
+    update_scan_fields(scan_id, **fields)
 
 
 async def _flush_pipeline_partial_report(
@@ -391,6 +396,8 @@ async def _async_run_scan_pipeline(
             )
             await _scan_update(
                 scan_id,
+                progress_percent=last_shown_progress,
+                progress=int(last_shown_progress),
                 summary={
                     "phase": "fuzzing",
                     "current_module": module_type,
@@ -421,7 +428,13 @@ async def _async_run_scan_pipeline(
 
             while not scan_task.done():
                 current_completed = cumulative_completed + engine.stats.completed
-                raw_pct = min(100.0, round(current_completed / overall_total * 100, 1))
+                effective_total = max(
+                    overall_total,
+                    cumulative_completed + engine.stats.queued,
+                    current_completed,
+                    1,
+                )
+                raw_pct = min(100.0, round(current_completed / effective_total * 100, 1))
                 if not scan_task.done() and raw_pct >= 99.9:
                     raw_pct = 99.9
                 progress_pct = max(last_shown_progress, raw_pct)
@@ -438,7 +451,7 @@ async def _async_run_scan_pipeline(
                     "current_module": module_type,
                     "module_index": module_run_idx,
                     "module_count": n_modules,
-                    "queued": overall_total,
+                    "queued": effective_total,
                     "completed": current_completed,
                     "failures": merged_stats.failures + engine.stats.failures,
                     "findings": findings_count,
@@ -470,6 +483,21 @@ async def _async_run_scan_pipeline(
 
             stats = await scan_task
 
+            cumulative_completed += stats.completed
+            effective_total = max(
+                overall_total,
+                cumulative_completed,
+                cumulative_completed + stats.queued,
+                1,
+            )
+            module_end_pct = min(100.0, round(cumulative_completed / effective_total * 100, 1))
+            last_shown_progress = max(last_shown_progress, module_end_pct)
+            await _scan_update(
+                scan_id,
+                progress_percent=last_shown_progress,
+                progress=int(last_shown_progress),
+            )
+
             # 모듈별 중간 리포트 저장
             module_output = runtime_output.with_name(
                 f"{runtime_output.stem}_{module_type}{runtime_output.suffix}"
@@ -484,7 +512,6 @@ async def _async_run_scan_pipeline(
 
             all_findings.extend(engine.findings)
             all_pipeline_modules.extend(context["modules"])
-            cumulative_completed += stats.completed
             if module_type in OOB_WEB_SCAN_TYPES:
                 scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
                 cumulative_findings = int((scan_row.summary or {}).get("findings", cumulative_findings))
@@ -500,7 +527,7 @@ async def _async_run_scan_pipeline(
                 "current_module": module_type,
                 "module_index": module_run_idx,
                 "module_count": n_modules,
-                "queued": overall_total,
+                "queued": effective_total,
                 "completed": cumulative_completed,
                 "failures": merged_stats.failures,
                 "findings": cumulative_findings,
