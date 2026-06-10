@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import parse_qsl, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from parsers.body_field_inference import (
     is_plausible_field_name,
@@ -19,8 +19,11 @@ from crawler.spa.capture_core import (
     api_source_rank,
     drop_get_stubs_for_path,
     parse_payload_fields,
+    path_has_live_capture,
+    path_has_live_mutating_body,
     path_key_from_url,
     record_api_candidate,
+    register_observed_query_fields,
     serialize_body_fields,
 )
 from crawler.spa.path_family import path_keys_share_body_field_family
@@ -67,6 +70,15 @@ def _looks_like_mutating_api_path(path: str) -> bool:
     return bool(set(segments) & _MUTATION_HINT_SEGMENTS)
 
 
+def _body_samples_are_dom_only(engine, path_key: str) -> bool:
+    """DOM 추론만으로 쌓인 body 샘플인지 (라이브 XHR 본문 없음)."""
+    dom_keys = getattr(engine, "dom_inferred_body_path_keys", None) or set()
+    live_keys = getattr(engine, "live_body_path_keys", None) or set()
+    if path_key not in dom_keys:
+        return False
+    return path_key not in live_keys
+
+
 def _should_promote_get_api_to_post(engine, entry: dict) -> bool:
     url = str(entry.get("url") or "")
     parsed = urlparse(url)
@@ -76,15 +88,25 @@ def _should_promote_get_api_to_post(engine, entry: dict) -> bool:
     if not path.startswith("/api/"):
         return False
 
+    path_key = path_key_from_url(url)
+    observed_body = getattr(engine, "observed_body_samples", None) or {}
+    observed_query = getattr(engine, "observed_query_samples", None) or {}
+
+    # 라이브 GET만 있고 DOM/라우트 쿼리 힌트가 있으면 GET 유지 (읽기 전용 API).
+    if path_has_live_capture(engine, path_key, methods=frozenset({"GET"})):
+        if not path_has_live_mutating_body(engine, path_key):
+            if observed_query.get(path_key) or _body_samples_are_dom_only(engine, path_key):
+                return False
+
     req_ct = str(entry.get("req_content_type") or "").lower()
     resp_ct = str(entry.get("content_type") or "").lower()
     has_json_signal = "json" in req_ct or "json" in resp_ct
     if not has_json_signal and not _looks_like_mutating_api_path(path):
         return False
 
-    path_key = path_key_from_url(url)
-    observed_body = getattr(engine, "observed_body_samples", None) or {}
     if observed_body.get(path_key):
+        if _body_samples_are_dom_only(engine, path_key) and not path_has_live_mutating_body(engine, path_key):
+            return False
         return True
 
     # If there is already any mutating sibling for the same path family, follow it.
@@ -97,7 +119,8 @@ def _should_promote_get_api_to_post(engine, entry: dict) -> bool:
             continue
         sibling_method = str(sibling.get("method") or "GET").upper()
         if sibling_method in _MUTATING_METHODS:
-            return True
+            if str(sibling.get("source") or "") == "capture":
+                return True
 
     return _looks_like_mutating_api_path(path)
 
@@ -612,14 +635,50 @@ def normalize_mutating_path_endpoints(engine) -> int:
     return changed
 
 
+def enrich_get_endpoints_from_query_observations(engine) -> int:
+    """관측된 쿼리 샘플로 GET API 엔드포인트를 보강 (클라이언트 라우팅·읽기 API)."""
+    query_samples = getattr(engine, "observed_query_samples", None) or {}
+    if not query_samples:
+        return 0
+    added = 0
+    for path_key, fields in query_samples.items():
+        if not fields:
+            continue
+        if path_has_live_mutating_body(engine, path_key):
+            continue
+        url = representative_url_for_path(engine, path_key)
+        if not url:
+            continue
+        parsed = urlparse(url)
+        query = urlencode({str(k): str(v) for k, v in fields.items() if str(k).strip()})
+        full_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", query, ""))
+        _, created = record_api_candidate(
+            engine,
+            method="GET",
+            url=full_url,
+            source="observed-query",
+        )
+        if created:
+            added += 1
+    return added
+
+
 def enrich_api_endpoints_from_observations(engine) -> int:
     body_samples = getattr(engine, "observed_body_samples", None) or {}
     body_cts = getattr(engine, "observed_body_content_types", None) or {}
+    query_added = enrich_get_endpoints_from_query_observations(engine)
     if not body_samples:
-        return 0
-    added = 0
+        return query_added
+    added = query_added
     for path_key, fields in body_samples.items():
         if not fields:
+            continue
+        if (
+            _body_samples_are_dom_only(engine, path_key)
+            and not path_has_live_mutating_body(engine, path_key)
+            and (getattr(engine, "observed_query_samples", None) or {}).get(path_key)
+        ):
+            register_observed_query_fields(engine, path_key, fields)
             continue
         content_type = body_cts.get(path_key, "application/json")
         post_data, req_content_type = serialize_body_fields(fields, content_type)
@@ -659,6 +718,10 @@ def enrich_api_endpoints_from_observations(engine) -> int:
 
         if path_has_mutating_with_body(engine, path_key):
             drop_get_stubs_for_path(engine, path_key)
+            continue
+
+        if _body_samples_are_dom_only(engine, path_key) and not path_has_live_mutating_body(engine, path_key):
+            register_observed_query_fields(engine, path_key, fields)
             continue
 
         url = representative_url_for_path(engine, path_key)
@@ -758,17 +821,21 @@ def prioritize_api_endpoints(engine) -> list[dict]:
         mutating = [api for api in group if str(api.get("method") or "").upper() in _MUTATING_METHODS]
         gets = [api for api in group if str(api.get("method") or "GET").upper() == "GET"]
         body_observed = bool((getattr(engine, "observed_body_samples", None) or {}).get(path_key))
+        query_observed = bool((getattr(engine, "observed_query_samples", None) or {}).get(path_key))
+        dom_only_body = _body_samples_are_dom_only(engine, path_key)
         if mutating:
             selected.append(max(mutating, key=lambda api: score_api_endpoint(engine, api)))
-            if body_observed:
+            if body_observed and not (query_observed and dom_only_body):
                 continue
         if not gets:
             continue
         best_get = max(gets, key=lambda api: score_api_endpoint(engine, api))
         if mutating and not api_has_live_signal(engine, best_get):
-            continue
+            if not query_observed:
+                continue
         if body_observed and not urlparse(best_get.get("url") or "").query:
-            continue
+            if not query_observed:
+                continue
         selected.append(best_get)
     selected.sort(key=lambda api: score_api_endpoint(engine, api), reverse=True)
     return selected

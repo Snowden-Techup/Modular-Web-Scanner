@@ -19,7 +19,37 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_CAPTURE_SOURCES = frozenset({"capture", "auth-login-json", "auth-login-form", "seed", "observed-body"})
+_READ_API_MUTATION_SEGMENTS = frozenset(
+    {
+        "add",
+        "create",
+        "delete",
+        "remove",
+        "update",
+        "edit",
+        "write",
+        "submit",
+        "upload",
+        "verify",
+        "confirm",
+        "process",
+        "checkout",
+        "cart",
+        "wishlist",
+        "comment",
+        "review",
+        "reviews",
+        "board",
+    }
+)
+_CAPTURE_SOURCES = frozenset({
+    "capture",
+    "auth-login-json",
+    "auth-login-form",
+    "seed",
+    "observed-body",
+    "observed-query",
+})
 
 MAX_PAYLOAD_SIZE = 512 * 1024
 MAX_SYNTHESIZED_LINKS = 200
@@ -499,12 +529,113 @@ def _spa_path_keys_related(api_path_key: str, sample_key: str) -> bool:
     return spa_path_keys_related(api_path_key, sample_key)
 
 
+def path_has_live_capture(
+    engine,
+    path_key: str,
+    *,
+    methods: frozenset[str] | None = None,
+) -> bool:
+    """네트워크 인터셉트(source=capture)로 실제 관측된 HTTP 메서드가 있는지 확인."""
+    for entry in engine.api_endpoints.values():
+        if path_key_from_url(entry.get("url") or "") != path_key:
+            continue
+        if str(entry.get("source") or "") != "capture":
+            continue
+        method = str(entry.get("method") or "GET").upper()
+        if methods is None or method in methods:
+            return True
+    return False
+
+
+def path_has_live_mutating_body(engine, path_key: str) -> bool:
+    """라이브 XHR/fetch에서 본문이 실린 변경 메서드가 있는지 확인."""
+    for entry in engine.api_endpoints.values():
+        if path_key_from_url(entry.get("url") or "") != path_key:
+            continue
+        if str(entry.get("source") or "") != "capture":
+            continue
+        method = str(entry.get("method") or "GET").upper()
+        if method not in _MUTATING_METHODS:
+            continue
+        if entry.get("post_data") or parse_payload_fields(
+            entry.get("post_data") or "", entry.get("req_content_type") or ""
+        ):
+            return True
+    return False
+
+
+def is_neutral_read_api_path(path_key: str) -> bool:
+    """변경 의도 세그먼트가 없는 /api/* 경로 (읽기·미리보기 API 후보)."""
+    if not str(path_key or "").startswith("/api/"):
+        return False
+    segments = {seg.lower() for seg in path_key.split("/") if seg}
+    return not bool(segments & _READ_API_MUTATION_SEGMENTS)
+
+
+def dom_fields_should_map_to_query(engine, api_path_key: str) -> bool:
+    """
+    UI 폼 필드를 GET 쿼리 파라미터로 매핑해야 하는지 판단.
+    라이브 GET만 있고 변경 메서드 본문이 없는 읽기 전용 API에 적용.
+    """
+    if path_has_live_mutating_body(engine, api_path_key):
+        return False
+    if path_has_live_capture(engine, api_path_key, methods=frozenset({"GET"})):
+        return True
+    has_get_seed = False
+    for entry in engine.api_endpoints.values():
+        if path_key_from_url(entry.get("url") or "") != api_path_key:
+            continue
+        method = str(entry.get("method") or "GET").upper()
+        src = str(entry.get("source") or "")
+        if method == "GET" and src in ("capture", "js-static"):
+            has_get_seed = True
+            break
+    if has_get_seed:
+        return not path_has_live_capture(engine, api_path_key, methods=_MUTATING_METHODS)
+    if is_neutral_read_api_path(api_path_key):
+        return not path_has_live_capture(engine, api_path_key, methods=_MUTATING_METHODS)
+    return False
+
+
+def register_observed_query_fields(
+    engine,
+    path_key: str,
+    fields: dict[str, str],
+) -> int:
+    """path_key에 쿼리 파라미터 샘플을 병합. 변경된 path_key 수 반환."""
+    if not path_key or not fields:
+        return 0
+    names_map = getattr(engine, "observed_query_params", None)
+    if names_map is None:
+        engine.observed_query_params = {}
+        names_map = engine.observed_query_params
+    samples_map = getattr(engine, "observed_query_samples", None)
+    if samples_map is None:
+        engine.observed_query_samples = {}
+        samples_map = engine.observed_query_samples
+    names = names_map.setdefault(path_key, set())
+    samples = samples_map.setdefault(path_key, {})
+    before = len(samples)
+    for key, value in fields.items():
+        key_str = str(key).strip()
+        if not key_str:
+            continue
+        names.add(key_str)
+        store_observed_sample(samples, key_str, str(value))
+    return 1 if len(samples) > before or (before == 0 and samples) else 0
+
+
 def register_observed_body_keys(engine, url: str, post_data: str | None, content_type: str) -> None:
     fields = parse_payload_fields(post_data or "", content_type)
     file_names = parse_multipart_file_field_names(post_data or "", content_type)
     if not fields and not file_names:
         return
     path_key = path_key_from_url(url)
+    live_keys = getattr(engine, "live_body_path_keys", None)
+    if live_keys is None:
+        engine.live_body_path_keys = set()
+        live_keys = engine.live_body_path_keys
+    live_keys.add(path_key)
     names_map = getattr(engine, "observed_body_params", None)
     if names_map is None:
         engine.observed_body_params = {}
