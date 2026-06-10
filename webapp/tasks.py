@@ -248,12 +248,8 @@ def _persist_pipeline_partial_report(
         report_json = reporter.build_deduped_report()
 
     reporter.export_to_json(str(runtime_output))
-    scan_row = get_scan_by_public_id(scan_id)
-    fields: dict = {"report_json": report_json, "summary": summary}
-    if scan_row is not None:
-        fields["progress_percent"] = scan_row.progress_percent
-        fields["progress"] = scan_row.progress
-    update_scan_fields(scan_id, **fields)
+    # Do not touch progress fields here — concurrent poll loop may have advanced them.
+    update_scan_fields(scan_id, report_json=report_json, summary=summary)
 
 
 async def _flush_pipeline_partial_report(
@@ -428,13 +424,14 @@ async def _async_run_scan_pipeline(
 
             while not scan_task.done():
                 current_completed = cumulative_completed + engine.stats.completed
-                effective_total = max(
+                observed_total = max(
                     overall_total,
                     cumulative_completed + engine.stats.queued,
                     current_completed,
                     1,
                 )
-                raw_pct = min(100.0, round(current_completed / effective_total * 100, 1))
+                # Fixed planned denominator — growing queued must not shrink the percentage.
+                raw_pct = min(100.0, round(current_completed / overall_total * 100, 1))
                 if not scan_task.done() and raw_pct >= 99.9:
                     raw_pct = 99.9
                 progress_pct = max(last_shown_progress, raw_pct)
@@ -451,7 +448,7 @@ async def _async_run_scan_pipeline(
                     "current_module": module_type,
                     "module_index": module_run_idx,
                     "module_count": n_modules,
-                    "queued": effective_total,
+                    "queued": observed_total,
                     "completed": current_completed,
                     "failures": merged_stats.failures + engine.stats.failures,
                     "findings": findings_count,
@@ -484,13 +481,13 @@ async def _async_run_scan_pipeline(
             stats = await scan_task
 
             cumulative_completed += stats.completed
-            effective_total = max(
+            observed_total = max(
                 overall_total,
                 cumulative_completed,
                 cumulative_completed + stats.queued,
                 1,
             )
-            module_end_pct = min(100.0, round(cumulative_completed / effective_total * 100, 1))
+            module_end_pct = min(100.0, round(cumulative_completed / overall_total * 100, 1))
             last_shown_progress = max(last_shown_progress, module_end_pct)
             await _scan_update(
                 scan_id,
@@ -527,7 +524,7 @@ async def _async_run_scan_pipeline(
                 "current_module": module_type,
                 "module_index": module_run_idx,
                 "module_count": n_modules,
-                "queued": effective_total,
+                "queued": observed_total,
                 "completed": cumulative_completed,
                 "failures": merged_stats.failures,
                 "findings": cumulative_findings,
@@ -771,12 +768,11 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
 
         while not scan_task.done():
             queued_total = engine.stats.queued
-            effective_total = max(total_requests, queued_total, 1)
+            observed_total = max(total_requests, queued_total, engine.stats.completed, 1)
             completed = engine.stats.completed
-            raw_progress_pct = min(100.0, round(completed / effective_total * 100, 1))
+            raw_progress_pct = min(100.0, round(completed / total_requests * 100, 1))
             if not scan_task.done() and raw_progress_pct >= 99.9:
                 raw_progress_pct = 99.9
-            # queued grows while surfaces are submitted (await queue.put yields); keep UI monotonic.
             progress_pct = max(last_shown_progress, raw_progress_pct)
             last_shown_progress = progress_pct
 
@@ -788,12 +784,12 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
 
             summary = {
                 "phase": "fuzzing",
-                "queued": queued_total,
+                "queued": observed_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
                 "findings": findings_count,
                 "elapsed_time": round(time.monotonic() - started_at, 2),
-                "total_requests": effective_total,
+                "total_requests": total_requests,
                 "planned_requests": total_requests,
             }
 

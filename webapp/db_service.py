@@ -282,6 +282,20 @@ def update_scan_fields(scan_id: str, **fields) -> None:
         scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
         if scan is None:
             return
+        if scan.status == "running":
+            if "progress_percent" in fields:
+                incoming = float(fields["progress_percent"] or 0)
+                current = float(scan.progress_percent or 0)
+                # Allow explicit reset to 0 at fuzzing start; otherwise never regress.
+                fields["progress_percent"] = (
+                    incoming if incoming == 0 and current == 0 else max(current, incoming)
+                )
+            if "progress" in fields:
+                incoming_p = int(fields["progress"] or 0)
+                current_p = int(scan.progress or 0)
+                fields["progress"] = (
+                    incoming_p if incoming_p == 0 and current_p == 0 else max(current_p, incoming_p)
+                )
         for key, value in fields.items():
             setattr(scan, key, value)
         scan.updated_at = datetime.now(timezone.utc)

@@ -1499,11 +1499,21 @@
     }
 
     function formatProgressPercent(scan) {
-      const p = scan.progress_percent;
-      if (typeof p === "number" && !Number.isNaN(p)) return `${p.toFixed(1)}%`;
-      const q = scan.progress;
-      if (typeof q === "number" && !Number.isNaN(q)) return `${Number(q).toFixed(1)}%`;
-      return "0.0%";
+      let pct = 0;
+      if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
+        pct = scan.progress_percent;
+      } else {
+        const { planned, completed } = resolveProgressTotals(scan);
+        pct = planned > 0
+          ? Math.min(100, Math.round((completed / planned) * 1000) / 10)
+          : Number(scan.progress ?? 0);
+      }
+      if (scan.status === "running") {
+        pct = Math.max(displayedProgressPercent, pct);
+      } else if (scan.status === "completed") {
+        pct = 100;
+      }
+      return `${Math.min(100, Math.max(0, pct)).toFixed(1)}%`;
     }
 
     function resolveProgressTotals(scan) {
@@ -1514,30 +1524,32 @@
       const queued = Number(sum.queued ?? 0);
       const completed = Number(sum.completed ?? 0);
       const failures = Number(sum.failures ?? 0);
-      const effectiveTotal = Math.max(
-        Number.isNaN(planned) ? 0 : planned,
-        Number.isNaN(queued) ? 0 : queued,
-        completed,
-        1
-      );
+      const plannedSafe = Number.isNaN(planned) ? 0 : planned;
+      const queuedSafe = Number.isNaN(queued) ? 0 : queued;
+      const observedTotal = Math.max(plannedSafe, queuedSafe, completed, 1);
       const success = Math.min(
         Math.max(0, completed - failures),
-        effectiveTotal
+        observedTotal
       );
-      return { effectiveTotal, completed, failures, success };
+      return { planned: plannedSafe, observedTotal, completed, failures, success };
     }
 
     function resolveScanPhase(scan) {
       const phase = scan.summary?.phase;
       const sum = scan.summary || {};
-      if (phase === "crawling") return "crawling";
       if (phase === "queued" || scan.status === "queued") return "queued";
-      if (phase === "fuzzing") return "fuzzing";
       if (
-        Number(sum.module_index ?? 0) > 0
-        || Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
+        phase === "fuzzing"
+        || Number(sum.module_index ?? 0) > 0
         || Number(sum.completed ?? 0) > 0
         || (typeof scan.progress_percent === "number" && scan.progress_percent > 0)
+      ) {
+        return "fuzzing";
+      }
+      if (phase === "crawling") return "crawling";
+      if (
+        Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
+        && scan.status === "running"
       ) {
         return "fuzzing";
       }
@@ -1560,9 +1572,9 @@
       const isPreFuzzing = phase === "crawling" || phase === "queued";
 
       if (isPreFuzzing) {
-        displayedProgressPercent = 0;
         scanPhaseLabel.hidden = false;
         scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
+        displayedProgressPercent = 0;
         scanProgressPercent.textContent = "—";
         scanProgressFill.style.width = "0%";
         scanProgressTrack.setAttribute("aria-valuenow", "0");
@@ -1586,17 +1598,17 @@
       }
       progressStats.classList.remove("is-pre-fuzzing");
 
-      const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);
+      const { planned, observedTotal, completed, failures, success } = resolveProgressTotals(scan);
 
-      statTotal.textContent = String(effectiveTotal);
+      statTotal.textContent = String(observedTotal);
       statSuccess.textContent = String(success);
       statFail.textContent = String(failures);
 
       let pct = 0;
       if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
         pct = scan.progress_percent;
-      } else if (effectiveTotal > 0) {
-        pct = Math.min(100, Math.round((completed / effectiveTotal) * 1000) / 10);
+      } else if (planned > 0) {
+        pct = Math.min(100, Math.round((completed / planned) * 1000) / 10);
       } else {
         pct = Number(scan.progress ?? 0);
       }
