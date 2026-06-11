@@ -20,6 +20,9 @@ def prepare_scan_context(args, surfaces):
         args.rps = 10
         args.workers = 2
         print("[SYSTEM] stored_xss 모듈 감지: 강제로 RPS 10, Worker 2로 하향 조정합니다.")
+    elif args.type == "sqli":
+        args.workers = 2
+        print("[SYSTEM] sqli 모듈 감지: 강제로 Worker 2로 하향 조정합니다.")
 
     selected_modules = select_modules(args)
     if not selected_modules:
