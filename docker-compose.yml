@@ -70,12 +70,12 @@ services:
         condition: service_healthy
     restart: always
     cpus: "1.0"
-    mem_limit: 3g
+    mem_limit: 6g
     deploy:
       resources:
         limits:
           cpus: "1.0"
-          memory: 3G
+          memory: 6G
 
   nginx:
     image: nginx:alpine
