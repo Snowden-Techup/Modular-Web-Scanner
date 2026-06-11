@@ -12,6 +12,39 @@ MAX_SCAN_HISTORY_PER_USER = 10
 # psycopg/PostgreSQL bind parameter limit is 65535; keep IN batches well below that.
 _OOB_TOKEN_BATCH_SIZE = 2000
 
+_PHASE_RANK: dict[str, int] = {
+    "queued": 0,
+    "crawling": 1,
+    "fuzzing": 2,
+    "completed": 3,
+}
+_MONOTONIC_SUMMARY_COUNTERS = frozenset(
+    {"queued", "completed", "failures", "findings", "findings_raw", "module_index"}
+)
+
+
+def merge_scan_summary(existing: dict | None, patch: dict | None) -> dict:
+    """
+    Merge summary JSON without regressing scan phase or cumulative counters.
+
+    OOB webhooks and the Celery progress loop can update the same row concurrently;
+    a stale read must not restore ``phase: crawling`` after fuzzing has started.
+    """
+    base = dict(existing or {})
+    if not patch:
+        return base
+    merged = {**base, **patch}
+    if "phase" in patch:
+        old_phase = str(base.get("phase") or "")
+        new_phase = str(patch.get("phase") or old_phase)
+        old_rank = _PHASE_RANK.get(old_phase, -1)
+        new_rank = _PHASE_RANK.get(new_phase, -1)
+        merged["phase"] = new_phase if new_rank >= old_rank else old_phase
+    for key in _MONOTONIC_SUMMARY_COUNTERS:
+        if key in base or key in patch:
+            merged[key] = max(int(base.get(key) or 0), int(patch.get(key) or 0))
+    return merged
+
 
 def _ts(dt: datetime | None) -> float:
     if dt is None:
@@ -296,6 +329,8 @@ def update_scan_fields(scan_id: str, **fields) -> None:
                 fields["progress"] = (
                     incoming_p if incoming_p == 0 and current_p == 0 else max(current_p, incoming_p)
                 )
+        if "summary" in fields and isinstance(fields["summary"], dict):
+            fields["summary"] = merge_scan_summary(scan.summary, fields["summary"])
         for key, value in fields.items():
             setattr(scan, key, value)
         scan.updated_at = datetime.now(timezone.utc)

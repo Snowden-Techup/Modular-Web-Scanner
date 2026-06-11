@@ -30,6 +30,7 @@ from webapp.database import SessionLocal
 from webapp.db_service import (
     MAX_SCAN_HISTORY_PER_USER,
     build_oob_report_json,
+    merge_scan_summary,
     count_deduped_findings,
     findings_from_rows,
     get_oob_token_meta,
@@ -596,14 +597,22 @@ async def receive_oob_hit(data: OOBWebhookData) -> dict:
             db.add(finding)
             db.flush()
 
-            scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+            scan = (
+                db.query(Scan)
+                .filter(Scan.scan_id == scan_id)
+                .with_for_update()
+                .first()
+            )
             if scan:
                 rows = db.query(Finding).filter(Finding.scan_id == scan_pk).all()
                 deduped_count = count_deduped_findings(rows)
-                summary = dict(scan.summary or {})
-                summary["findings"] = deduped_count
-                summary["findings_raw"] = len(rows)
-                scan.summary = summary
+                scan.summary = merge_scan_summary(
+                    scan.summary,
+                    {
+                        "findings": deduped_count,
+                        "findings_raw": len(rows),
+                    },
+                )
                 scan.report_json = build_oob_report_json(scan, rows)
                 scan.updated_at = datetime.now(timezone.utc)
 

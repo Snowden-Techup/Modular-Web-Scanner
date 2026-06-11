@@ -1534,25 +1534,27 @@
       return { planned: plannedSafe, observedTotal, completed, failures, success };
     }
 
-    function resolveScanPhase(scan) {
-      const phase = scan.summary?.phase;
+    function hasFuzzingActivity(scan) {
       const sum = scan.summary || {};
-      if (phase === "queued" || scan.status === "queued") return "queued";
-      if (
-        phase === "fuzzing"
+      return (
+        sum.phase === "fuzzing"
         || Number(sum.module_index ?? 0) > 0
         || Number(sum.completed ?? 0) > 0
+        || Number(sum.findings ?? 0) > 0
+        || Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
+        || Number(sum.surface_count ?? 0) > 0
         || (typeof scan.progress_percent === "number" && scan.progress_percent > 0)
-      ) {
-        return "fuzzing";
-      }
+        || (Array.isArray(scan.report_json?.vulnerabilities) && scan.report_json.vulnerabilities.length > 0)
+        || (Array.isArray(scan.findings) && scan.findings.length > 0)
+      );
+    }
+
+    function resolveScanPhase(scan) {
+      const phase = scan.summary?.phase;
+      if (phase === "queued" || scan.status === "queued") return "queued";
+      if (scan.status === "running" && hasFuzzingActivity(scan)) return "fuzzing";
+      if (phase === "fuzzing" || hasFuzzingActivity(scan)) return "fuzzing";
       if (phase === "crawling") return "crawling";
-      if (
-        Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
-        && scan.status === "running"
-      ) {
-        return "fuzzing";
-      }
       if (scan.status === "running") return "crawling";
       return phase || scan.status || "";
     }
@@ -1574,7 +1576,6 @@
       if (isPreFuzzing) {
         scanPhaseLabel.hidden = false;
         scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
-        displayedProgressPercent = 0;
         scanProgressPercent.textContent = "—";
         scanProgressFill.style.width = "0%";
         scanProgressTrack.setAttribute("aria-valuenow", "0");
@@ -2215,4 +2216,5 @@
     });
   </script>
 </body>
+</html>
 </html>

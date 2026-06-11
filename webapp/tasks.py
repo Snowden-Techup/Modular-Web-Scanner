@@ -705,6 +705,14 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
     if not surfaces:
         raise RuntimeError("No attack surfaces resolved from target.")
     await _scan_log(scan_id, f"공격면 수집 완료: {len(surfaces)}개")
+    await _scan_update(
+        scan_id,
+        summary={
+            "phase": "fuzzing",
+            "surface_count": len(surfaces),
+            "elapsed_time": round(time.monotonic() - started_at, 2),
+        },
+    )
 
     # -t all: 모듈 순차 파이프라인 실행
     if args.type == "all":
