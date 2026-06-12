@@ -347,6 +347,7 @@ async def _async_run_scan_pipeline(
             "module_index": 0,
             "module_count": n_modules,
             "queued": 0,
+            "observed_total": 0,
             "completed": 0,
             "failures": 0,
             "findings": 0,
@@ -399,7 +400,8 @@ async def _async_run_scan_pipeline(
                     "current_module": module_type,
                     "module_index": module_run_idx,
                     "module_count": n_modules,
-                    "queued": overall_total,
+                    "queued": 0,
+                    "observed_total": max(overall_total, cumulative_completed, 1),
                     "completed": cumulative_completed,
                     "failures": merged_stats.failures,
                     "findings": cumulative_findings,
@@ -448,7 +450,8 @@ async def _async_run_scan_pipeline(
                     "current_module": module_type,
                     "module_index": module_run_idx,
                     "module_count": n_modules,
-                    "queued": observed_total,
+                    "queued": engine.stats.queued,
+                    "observed_total": observed_total,
                     "completed": current_completed,
                     "failures": merged_stats.failures + engine.stats.failures,
                     "findings": findings_count,
@@ -524,7 +527,8 @@ async def _async_run_scan_pipeline(
                 "current_module": module_type,
                 "module_index": module_run_idx,
                 "module_count": n_modules,
-                "queued": observed_total,
+                "queued": stats.queued,
+                "observed_total": observed_total,
                 "completed": cumulative_completed,
                 "failures": merged_stats.failures,
                 "findings": cumulative_findings,
@@ -593,21 +597,23 @@ async def _async_run_scan_pipeline(
                 return build_oob_report_json(scan_row, rows)
 
             report_json = await asyncio.to_thread(_build_pipeline_oob_report)
-    final_total = max(overall_total, merged_stats.queued, merged_stats.completed, 1)
+    final_observed = max(overall_total, merged_stats.queued, merged_stats.completed, 1)
     await _scan_update(
         scan_id,
         status="completed",
         progress=100,
         progress_percent=100.0,
+        total_requests=overall_total,
         summary={
             "phase": "completed",
             "module_count": n_modules,
             "queued": merged_stats.queued,
+            "observed_total": final_observed,
             "completed": merged_stats.completed,
             "failures": merged_stats.failures,
             "findings": merged_stats.findings,
             "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": final_total,
+            "total_requests": overall_total,
             "planned_requests": overall_total,
         },
         result={
@@ -754,6 +760,7 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         summary={
             "phase": "fuzzing",
             "queued": 0,
+            "observed_total": 0,
             "completed": 0,
             "failures": 0,
             "findings": 0,
@@ -792,7 +799,8 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
 
             summary = {
                 "phase": "fuzzing",
-                "queued": observed_total,
+                "queued": queued_total,
+                "observed_total": observed_total,
                 "completed": completed,
                 "failures": engine.stats.failures,
                 "findings": findings_count,
@@ -894,20 +902,22 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         except (OSError, json.JSONDecodeError) as exc:
             await _scan_log(scan_id, f"리포트 JSON 로드 실패: {exc}")
 
-    final_total = max(total_requests, stats.queued, stats.completed, 1)
+    final_observed = max(total_requests, stats.queued, stats.completed, 1)
     await _scan_update(
         scan_id,
         status="completed",
         progress=100,
         progress_percent=100.0,
+        total_requests=total_requests,
         summary={
             "phase": "completed",
             "queued": stats.queued,
+            "observed_total": final_observed,
             "completed": stats.completed,
             "failures": stats.failures,
             "findings": deduped_findings_count,
             "elapsed_time": round(time.monotonic() - started_at, 2),
-            "total_requests": final_total,
+            "total_requests": total_requests,
             "planned_requests": total_requests,
         },
         result={

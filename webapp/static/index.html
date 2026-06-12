@@ -1313,7 +1313,7 @@
             <strong id="statTotal">—</strong>
           </div>
           <div class="progress-stat">
-            <span class="muted">성공</span>
+            <span class="muted">완료</span>
             <strong id="statSuccess">—</strong>
           </div>
           <div class="progress-stat">
@@ -1498,6 +1498,12 @@
       return headers;
     }
 
+    function formatScanCount(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return "—";
+      return n.toLocaleString("ko-KR");
+    }
+
     function formatProgressPercent(scan) {
       let pct = 0;
       if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
@@ -1521,17 +1527,23 @@
       const planned = Number(
         sum.planned_requests ?? scan.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0
       );
-      const queued = Number(sum.queued ?? 0);
+      const observed = Number(sum.observed_total ?? 0);
       const completed = Number(sum.completed ?? 0);
       const failures = Number(sum.failures ?? 0);
       const plannedSafe = Number.isNaN(planned) ? 0 : planned;
-      const queuedSafe = Number.isNaN(queued) ? 0 : queued;
-      const observedTotal = Math.max(plannedSafe, queuedSafe, completed, 1);
-      const success = Math.min(
-        Math.max(0, completed - failures),
-        observedTotal
-      );
-      return { planned: plannedSafe, observedTotal, completed, failures, success };
+      const observedSafe = Number.isNaN(observed) ? 0 : observed;
+      const completedSafe = Number.isNaN(completed) ? 0 : completed;
+      const failuresSafe = Number.isNaN(failures) ? 0 : failures;
+      const observedExcess = observedSafe > plannedSafe && plannedSafe > 0
+        ? observedSafe - plannedSafe
+        : 0;
+      return {
+        planned: plannedSafe,
+        observed: observedSafe,
+        completed: completedSafe,
+        failures: failuresSafe,
+        observedExcess,
+      };
     }
 
     function hasFuzzingActivity(scan) {
@@ -1580,6 +1592,7 @@
         scanProgressFill.style.width = "0%";
         scanProgressTrack.setAttribute("aria-valuenow", "0");
         statTotal.textContent = "—";
+        statTotal.title = "";
         statSuccess.textContent = "—";
         statFail.textContent = "—";
         progressStats.classList.add("is-pre-fuzzing");
@@ -1599,11 +1612,14 @@
       }
       progressStats.classList.remove("is-pre-fuzzing");
 
-      const { planned, observedTotal, completed, failures, success } = resolveProgressTotals(scan);
+      const { planned, completed, failures, observedExcess } = resolveProgressTotals(scan);
 
-      statTotal.textContent = String(observedTotal);
-      statSuccess.textContent = String(success);
-      statFail.textContent = String(failures);
+      statTotal.textContent = planned > 0 ? formatScanCount(planned) : "—";
+      statTotal.title = observedExcess > 0
+        ? `실측 ${formatScanCount(planned + observedExcess)}건 (예상보다 +${formatScanCount(observedExcess)}건)`
+        : "";
+      statSuccess.textContent = formatScanCount(completed);
+      statFail.textContent = formatScanCount(failures);
 
       let pct = 0;
       if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
