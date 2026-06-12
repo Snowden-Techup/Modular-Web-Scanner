@@ -19,7 +19,18 @@ _PHASE_RANK: dict[str, int] = {
     "completed": 3,
 }
 _MONOTONIC_SUMMARY_COUNTERS = frozenset(
-    {"queued", "completed", "failures", "findings", "findings_raw", "module_index"}
+    {
+        "queued",
+        "completed",
+        "failures",
+        "findings",
+        "findings_raw",
+        "module_index",
+        "module_count",
+        "planned_requests",
+        "total_requests",
+        "observed_total",
+    }
 )
 
 
@@ -43,6 +54,14 @@ def merge_scan_summary(existing: dict | None, patch: dict | None) -> dict:
     for key in _MONOTONIC_SUMMARY_COUNTERS:
         if key in base or key in patch:
             merged[key] = max(int(base.get(key) or 0), int(patch.get(key) or 0))
+    # ``module_index`` is monotonic above; ``current_module`` must advance in lockstep.
+    if "current_module" in patch or "module_index" in patch:
+        base_idx = int(base.get("module_index") or 0)
+        patch_idx = int(patch.get("module_index") or 0)
+        if patch_idx >= base_idx and patch.get("current_module"):
+            merged["current_module"] = patch["current_module"]
+        elif "current_module" in base:
+            merged["current_module"] = base["current_module"]
     return merged
 
 

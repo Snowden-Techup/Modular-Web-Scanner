@@ -1505,14 +1505,14 @@
     }
 
     function formatProgressPercent(scan) {
+      const { planned, completed } = resolveProgressTotals(scan);
       let pct = 0;
-      if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
+      if (planned > 0) {
+        pct = Math.min(100, Math.round((completed / planned) * 1000) / 10);
+      } else if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
         pct = scan.progress_percent;
       } else {
-        const { planned, completed } = resolveProgressTotals(scan);
-        pct = planned > 0
-          ? Math.min(100, Math.round((completed / planned) * 1000) / 10)
-          : Number(scan.progress ?? 0);
+        pct = Number(scan.progress ?? 0);
       }
       if (scan.status === "running") {
         pct = Math.max(displayedProgressPercent, pct);
@@ -1622,17 +1622,17 @@
       statFail.textContent = formatScanCount(failures);
 
       let pct = 0;
-      if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
-        pct = scan.progress_percent;
-      } else if (planned > 0) {
+      if (planned > 0) {
         pct = Math.min(100, Math.round((completed / planned) * 1000) / 10);
+      } else if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
+        pct = scan.progress_percent;
       } else {
         pct = Number(scan.progress ?? 0);
       }
       if (scan.status === "completed") {
         pct = 100;
         displayedProgressPercent = 100;
-      } else {
+      } else if (scan.status === "running") {
         pct = Math.max(displayedProgressPercent, pct);
         displayedProgressPercent = pct;
       }

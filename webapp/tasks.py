@@ -222,6 +222,10 @@ async def _scan_update(scan_id: str, **fields) -> None:
     await asyncio.to_thread(update_scan_fields, scan_id, **fields)
 
 
+# Partial report flush only updates findings-side fields; progress is owned by the poll loop.
+_PARTIAL_REPORT_SUMMARY_KEYS = frozenset({"findings", "findings_raw", "failures", "elapsed_time"})
+
+
 def _persist_pipeline_partial_report(
     scan_id: str,
     *,
@@ -248,8 +252,11 @@ def _persist_pipeline_partial_report(
         report_json = reporter.build_deduped_report()
 
     reporter.export_to_json(str(runtime_output))
-    # Do not touch progress fields here — concurrent poll loop may have advanced them.
-    update_scan_fields(scan_id, report_json=report_json, summary=summary)
+    report_summary = {k: summary[k] for k in _PARTIAL_REPORT_SUMMARY_KEYS if k in summary}
+    if report_summary:
+        update_scan_fields(scan_id, report_json=report_json, summary=report_summary)
+    else:
+        update_scan_fields(scan_id, report_json=report_json)
 
 
 async def _flush_pipeline_partial_report(
