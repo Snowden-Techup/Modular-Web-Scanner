@@ -1,0 +1,81 @@
+# Git
+.git
+.gitignore
+.github/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# 가상환경
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 환경 변수 (절대 이미지 포함 금지)
+.env
+.env.local
+.env.*.local
+*.env
+
+# 문서/설정
+README.md
+docs/
+LICENSE
+*.md
+
+# 테스트
+tests/
+test_*.py
+*_test.py
+
+# 로그
+*.log
+logs/
+
+# 도커 자체
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# 빌드 산출물
+dist/
+build/
+*.egg-info/
+
+# 스캐너 실행 결과물
+scan_report.json
+scan_report_full.json
+*.report.json
+trivy-results.sarif
+*.sarif
+reports/
+output/
+results/
+
+# 커버리지
+.coverage
+coverage.xml
+.cache/

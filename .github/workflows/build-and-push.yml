@@ -5,6 +5,10 @@ on:
     branches: [ "main", "develop" ]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true  
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -43,6 +47,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
 
       - name: 6. 도커 이미지 빌드 및 푸시
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -56,7 +61,7 @@ jobs:
         continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          image-ref: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           format: sarif
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
