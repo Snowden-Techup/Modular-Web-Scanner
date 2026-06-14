@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
-from cli.output import print_scan_configuration, progress_printer
+from fuzzer.runtime_config import apply_module_runtime_policy
 from fuzzer import EngineStats, FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request, FuzzerResponse
@@ -17,9 +17,21 @@ from core.models import Payload
 
 def prepare_scan_context(args, surfaces):
     if args.type == "stored_xss":
-        args.rps = 10
-        args.workers = 2
-        print("[SYSTEM] stored_xss 모듈 감지: 강제로 RPS 10, Worker 2로 하향 조정합니다.")
+        from fuzzer.runtime_config import get_fuzzer_runtime_config
+
+        sx = get_fuzzer_runtime_config().stored_xss
+        requested_rps = max(1, int(getattr(args, "rps", 50) or 50))
+        args.rps = min(requested_rps, sx.max_concurrent_requests)
+        requested_workers = int(getattr(args, "workers", 0) or 0)
+        args.workers = (
+            min(requested_workers, sx.max_workers)
+            if requested_workers > 0
+            else sx.max_workers
+        )
+        print(
+            f"[SYSTEM] stored_xss 모듈 감지: RPS {args.rps}, workers {args.workers} "
+            f"(FUZZER_STORED_XSS_MAX_CONCURRENT / MAX_WORKERS)"
+        )
     elif args.type == "sqli":
         args.workers = 2
         print("[SYSTEM] sqli 모듈 감지: 강제로 Worker 2로 하향 조정합니다.")
@@ -68,8 +80,11 @@ async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
     for module in modules:
         if hasattr(module, "generated_tokens") and module.generated_tokens:
             for item in module.generated_tokens:
-                tokens_to_poll.append(item["token"])
-                token_map[item["token"]] = item
+                token = item.token if hasattr(item, "token") else item.get("token")
+                if not token:
+                    continue
+                tokens_to_poll.append(token)
+                token_map[token] = (module, item)
 
     if not tokens_to_poll:
         return oob_findings
@@ -102,7 +117,9 @@ async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
                             for hit in hits:
                                 hit_token = hit.get("token")
                                 if hit_token in token_map:
-                                    matched_info = token_map[hit_token]
+                                    matched_module, matched_info = token_map[hit_token]
+                                    if hasattr(matched_info, "to_poll_dict"):
+                                        matched_info = matched_info.to_poll_dict()
                                     target_url = matched_info.get("target", {}).get("url", "Unknown URL")
                                     param_name = matched_info.get("target", {}).get("parameter", "Unknown")
                                     protocol = hit.get("protocol", "Unknown")
@@ -120,8 +137,14 @@ async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
                                         risk_level=attack_info.get("risk_level", "High")
                                     )
 
+                                    surface = None
+                                    if hasattr(matched_module, "resolve_surface_for_token"):
+                                        surface = matched_module.resolve_surface_for_token(matched_info)
+                                    if surface is None:
+                                        surface = matched_info.get("surface_obj")
+
                                     oob_findings.append(Finding(
-                                        surface=matched_info["surface_obj"],
+                                        surface=surface,
                                         parameter=param_name,
                                         payload=reconstructed_payload,
                                         response=dummy_response,
@@ -152,13 +175,18 @@ async def poll_oob_results(modules: list, oob_domain: str) -> list[Finding]:
 
 
 async def run_scan(args, *, base_url: str, surfaces) -> None:
-    if args.type == "all":
-        await _run_scan_pipeline(args, base_url=base_url, surfaces=surfaces)
-    else:
-        await _run_scan_single(args, base_url=base_url, surfaces=surfaces)
+    from fuzzer.memory_monitor import scan_memory_monitor
+
+    scan_label = getattr(args, "scan_id", None) or "cli"
+    async with scan_memory_monitor(f"scan:{scan_label}"):
+        if args.type == "all":
+            await _run_scan_pipeline(args, base_url=base_url, surfaces=surfaces)
+        else:
+            await _run_scan_single(args, base_url=base_url, surfaces=surfaces)
 
 
 async def _run_scan_single(args, *, base_url: str, surfaces) -> None:
+    apply_module_runtime_policy(args.type)
     context = prepare_scan_context(args, surfaces)
     if context is None:
         return
@@ -256,6 +284,7 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
         for idx, module_type in enumerate(pipeline_types, 1):
             mod_args = copy.copy(args)
             mod_args.type = module_type
+            apply_module_runtime_policy(module_type)
 
             context = prepare_scan_context(mod_args, surfaces)
             if context is None:
