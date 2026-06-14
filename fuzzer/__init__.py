@@ -13,6 +13,25 @@ from .request_builder import (
     send_baseline_request,
     set_auth_provider,
 )
+from .memory_monitor import (
+    capture_memory_snapshot,
+    format_memory_log_line,
+    format_module_memory_end_line,
+    memory_log_mode,
+    module_memory_span,
+    scan_memory_monitor,
+)
+from .runtime_config import (
+    FuzzerRuntimeConfig,
+    FileUploadConfig,
+    LFIConfig,
+    StoredXSSConfig,
+    apply_module_runtime_policy,
+    clamp_text,
+    configure_fuzzer_runtime,
+    get_fuzzer_runtime_config,
+    reset_fuzzer_runtime_config,
+)
 
 __all__ = [
     "FuzzerEngine",
@@ -30,4 +49,19 @@ __all__ = [
     "set_auth_provider",
     "get_auth_provider",
     "scan_auth_lifecycle",
+    "FuzzerRuntimeConfig",
+    "StoredXSSConfig",
+    "LFIConfig",
+    "FileUploadConfig",
+    "apply_module_runtime_policy",
+    "clamp_text",
+    "configure_fuzzer_runtime",
+    "get_fuzzer_runtime_config",
+    "reset_fuzzer_runtime_config",
+    "capture_memory_snapshot",
+    "format_memory_log_line",
+    "format_module_memory_end_line",
+    "memory_log_mode",
+    "module_memory_span",
+    "scan_memory_monitor",
 ]
