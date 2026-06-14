@@ -7,7 +7,9 @@ from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Iterable, Protocol
 
 import aiohttp
+from fuzzer.payload_source import ModulePayloadSource, iter_attack_batches
 from fuzzer.request_builder import send_baseline_request, FuzzerResponse
+from fuzzer.runtime_config import FuzzerRuntimeConfig, configure_fuzzer_runtime, get_fuzzer_runtime_config
 
 try:
     from core.models import AttackSurface  # type: ignore
@@ -89,6 +91,7 @@ class FuzzerEngine:
         delay: float = 0.0,
         request_timeout: float = 15.0,
         queue_maxsize: int = 0,
+        runtime_config: FuzzerRuntimeConfig | None = None,
     ) -> None:
         if max_concurrent_requests < 1:
             raise ValueError("max_concurrent_requests must be >= 1")
@@ -108,11 +111,13 @@ class FuzzerEngine:
         self.session_pool_size = session_pool_size
         self.delay = delay
         self.request_timeout = request_timeout
+        self.runtime_config = runtime_config or get_fuzzer_runtime_config()
+        configure_fuzzer_runtime(self.runtime_config)
 
         self._semaphore = asyncio.Semaphore(max_concurrent_requests)
         self._queue: asyncio.Queue[AttackJob | None] = asyncio.Queue(maxsize=queue_maxsize)
         self._module_queues: dict[str, asyncio.Queue[AttackSurface | None]] = {}
-        self._module_payloads: dict[str, list[Any]] = {}
+        self._module_payload_sources: dict[str, ModulePayloadSource] = {}
         self._module_stop_events: dict[str, asyncio.Event] = {}
         self._module_workers: list[asyncio.Task[None]] = []
         self._module_runtime_active = False
@@ -335,8 +340,11 @@ class FuzzerEngine:
             module.name: asyncio.Queue()
             for module in self.modules
         }
-        self._module_payloads = {
-            module.name: list(module.get_payloads())
+        self._module_payload_sources = {
+            module.name: ModulePayloadSource(
+                module,
+                cache_enabled=self.runtime_config.cache_module_payloads,
+            )
             for module in self.modules
         }
         self._module_stop_events = {
@@ -347,7 +355,7 @@ class FuzzerEngine:
 
         for module in self.modules:
             queue = self._module_queues[module.name]
-            payloads = self._module_payloads[module.name]
+            payload_source = self._module_payload_sources[module.name]
             for index in range(self.concurrency_per_module):
                 worker = asyncio.create_task(
                     self._module_worker(
@@ -355,7 +363,7 @@ class FuzzerEngine:
                         session=sessions[index % len(sessions)],
                         module=module,
                         queue=queue,
-                        payloads=payloads,
+                        payload_source=payload_source,
                         request_sender=request_sender,
                         on_finding=on_finding,
                     )
@@ -375,7 +383,7 @@ class FuzzerEngine:
             stop_event = self._module_stop_events[module.name]
             if stop_event.is_set():
                 continue
-            payloads = self._module_payloads.get(module.name, [])
+            payload_source = self._module_payload_sources.get(module.name)
             queue = self._module_queues[module.name]
             params = tuple(self._iter_parameters(surface))
             selector = getattr(module, "get_target_parameters", None)
@@ -384,8 +392,9 @@ class FuzzerEngine:
                 params = tuple(selected) if selected is not None else ()
 
             await queue.put(surface)
+            payload_count = payload_source.count() if payload_source is not None else 0
             async with self._stats_lock:
-                self._stats.queued += len(params) * len(payloads)
+                self._stats.queued += len(params) * payload_count
 
     async def stop_module_mode(self) -> None:
         """
@@ -405,7 +414,7 @@ class FuzzerEngine:
         await asyncio.gather(*self._module_workers, return_exceptions=False)
         self._module_workers.clear()
         self._module_queues.clear()
-        self._module_payloads.clear()
+        self._module_payload_sources.clear()
         self._module_stop_events.clear()
         self._module_runtime_active = False
 
@@ -416,7 +425,7 @@ class FuzzerEngine:
         session: aiohttp.ClientSession,
         module: AttackModule,
         queue: asyncio.Queue[AttackSurface | None],
-        payloads: list[Any],
+        payload_source: ModulePayloadSource,
         request_sender: AsyncRequestSender,
         on_finding: ResultCallback | None,
     ) -> None:
@@ -435,18 +444,13 @@ class FuzzerEngine:
                 if callable(selector):
                     selected = selector(surface, params)
                     params = tuple(selected) if selected is not None else ()
-                if not params or not payloads:
+                if not params or payload_source.count() == 0:
                     continue
 
-                attack_units = [
-                    (parameter, payload)
-                    for parameter in params
-                    for payload in payloads
-                ]
-
+                payloads = await payload_source.ensure_cached()
                 baseline_response = await send_baseline_request(session, surface)
                 batch_size = max(1, self.max_concurrent_requests)
-                for batch in self._chunked(attack_units, batch_size):
+                for batch in iter_attack_batches(params, payloads, batch_size):
                     if stop_event is not None and stop_event.is_set():
                         break
                     tasks = [
