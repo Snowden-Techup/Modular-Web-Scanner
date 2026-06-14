@@ -8,13 +8,30 @@ from typing import List, Optional, Any, Dict, Tuple
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 from core.models import Payload
+from fuzzer.runtime_config import get_fuzzer_runtime_config
 
 # =====================================================================
-# 상수 및 설정 분리
+# 상수 및 설정 분리 (legacy ceiling — prefer runtime config)
 # =====================================================================
-MAX_RESPONSE_LENGTH = 2000000
+MAX_RESPONSE_LENGTH = 2 * 1024 * 1024
 MAX_PAYLOAD_LENGTH = 10000
 OBFUSCATION_THRESHOLD = 0.8
+
+
+def _stored_xss_limits():
+    cfg = get_fuzzer_runtime_config()
+    sx = cfg.stored_xss
+    return sx, cfg.max_response_body_bytes
+
+
+def get_analyze_body_max() -> int:
+    sx, global_max = _stored_xss_limits()
+    return sx.resolved_analyze_bytes(global_max)
+
+
+def get_dom_analysis_window() -> int:
+    return get_fuzzer_runtime_config().stored_xss.dom_window_bytes
+
 
 _DANGEROUS_PATTERNS = [
     re.compile(r'on(?:error|load|click|focus|mouseover|start|toggle|begin)\s*=\s*[^\s"\'>=]+', re.I),
@@ -683,6 +700,20 @@ def analyze_json_stored_context(
     return {"executable": False, "location": "json_stored_safe"}
 
 
+def slice_body_for_verify_analysis(
+    body: str,
+    marker: str,
+    *,
+    headers: Any = None,
+) -> str:
+    """Verify 분석용 본문 — JSON은 intact 유지, HTML은 마커 주변 윈도우만 사용."""
+    if not body or not marker or marker not in body:
+        return body
+    if looks_like_json_body(body, headers):
+        return body
+    return _body_window_for_dom(body, "", marker)
+
+
 def analyze_verify_response(
     body: str,
     payload_value: str,
@@ -729,12 +760,18 @@ def _is_waf_blocked(response: Any, original_res: Any, baseline_text: Optional[st
         return True
 
     if target_status == 200 and baseline_text and hasattr(response, 'text'):
+        compare_bytes = get_fuzzer_runtime_config().stored_xss.waf_compare_bytes
         current_text = response.text
         if len(current_text) > 0 and len(baseline_text) > 0:
             length_ratio = len(current_text) / len(baseline_text)
             if length_ratio < 0.1:
                 return True
-            similarity = difflib.SequenceMatcher(None, current_text[:1000], baseline_text[:1000]).ratio()
+            sample = compare_bytes
+            similarity = difflib.SequenceMatcher(
+                None,
+                current_text[:sample],
+                baseline_text[:sample],
+            ).ratio()
             if similarity < 0.5:
                 return True
 
@@ -795,6 +832,27 @@ def _extract_injected_marker(payload_value: str) -> Optional[str]:
     return None
 
 
+def _body_window_for_dom(
+    body: str,
+    payload_value: str,
+    marker: Optional[str] = None,
+    window: int | None = None,
+) -> str:
+    """BeautifulSoup DOM 분석용 — 마커 주변만 잘라 메모리 사용을 제한한다."""
+    if window is None:
+        window = get_dom_analysis_window()
+    if not body or len(body) <= window:
+        return body
+    idx = body.find(payload_value) if payload_value else -1
+    if idx < 0 and marker:
+        idx = body.find(marker)
+    if idx < 0:
+        return body[:window]
+    half = window // 2
+    start = max(0, idx - half)
+    return body[start : start + window]
+
+
 def _check_executable_in_response(body: str, payload_value: str, marker: Optional[str] = None) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "executable": False,
@@ -805,25 +863,53 @@ def _check_executable_in_response(body: str, payload_value: str, marker: Optiona
     if payload_value not in body and (marker and marker not in body):
         return result
 
-    payload_idx = body.find(payload_value)
+    dom_body = _body_window_for_dom(body, payload_value, marker)
+    payload_idx = dom_body.find(payload_value)
     if payload_idx == -1 and marker:
-        payload_idx = body.find(marker)
+        payload_idx = dom_body.find(marker)
 
     unique_markers = [marker] if marker else _extract_unique_markers(payload_value)
 
-    # 🌟 [개선 1] lxml 파서 우선 사용 및 html.parser 폴백
+    for pattern in _EXECUTABLE_XSS_PATTERNS:
+        for match in pattern.finditer(dom_body):
+            matched_str = match.group(0)
+            is_related = payload_value in matched_str
+            if not is_related:
+                for m in unique_markers:
+                    if m and m.lower() in matched_str.lower():
+                        is_related = True
+                        break
+
+            if not is_related and payload_idx >= 0:
+                match_start = match.start()
+                match_end = match.end()
+                payload_end = payload_idx + len(payload_value or marker or "")
+                if (match_start <= payload_idx <= match_end) or (
+                    match_start <= payload_end <= match_end
+                ):
+                    is_related = True
+
+            if is_related:
+                result["executable"] = True
+                result["evidence"] = matched_str[:200]
+                result["pattern_type"] = pattern.pattern[:50]
+                return result
+
+    if not get_fuzzer_runtime_config().stored_xss.use_dom_parser:
+        return result
+
     try:
-        soup = BeautifulSoup(body, 'lxml')
+        soup = BeautifulSoup(dom_body, 'lxml')
     except Exception:
-        soup = BeautifulSoup(body, 'html.parser')
+        soup = BeautifulSoup(dom_body, 'html.parser')
 
     try:
         for m in unique_markers:
-            if not m: continue
+            if not m:
+                continue
 
             m_lower = m.lower()
 
-            # 🌟 [개선 2] 단순히 속성 값이 아닌, "실행 가능한 속성"인지 엄격하게 검증
             def is_executable_attr_injection(tag):
                 for attr_name, attr_val in tag.attrs.items():
                     attr_val_str = str(attr_val).lower()
@@ -852,36 +938,6 @@ def _check_executable_in_response(body: str, payload_value: str, marker: Optiona
     except Exception:
         pass
 
-    if soup.find() is not None:
-        return result
-
-    for pattern in _EXECUTABLE_XSS_PATTERNS:
-        matches = pattern.finditer(body)
-        for match in matches:
-            matched_str = match.group(0)
-            is_related = False
-
-            if payload_value in matched_str:
-                is_related = True
-
-            for m in unique_markers:
-                if m and m.lower() in matched_str.lower():
-                    is_related = True
-                    break
-
-            match_start = match.start()
-            match_end = match.end()
-            payload_end = payload_idx + len(payload_value)
-
-            if (match_start <= payload_idx <= match_end) or (match_start <= payload_end <= match_end):
-                is_related = True
-
-            if is_related:
-                result["executable"] = True
-                result["evidence"] = matched_str[:200]
-                result["pattern_type"] = pattern.pattern[:50]
-                return result
-
     return result
 
 
@@ -905,26 +961,29 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
     """
     페이로드가 위치한 정확한 컨텍스트를 파악합니다. (오탐 방지 개선 로직 적용)
     """
-    payload_idx = body.find(payload_value)
+    if payload_value not in body and not (marker and marker in body):
+        return {"executable": False, "location": "not_reflected"}
 
-    if payload_idx == -1:
-        if marker and marker in body:
-            payload_idx = body.find(marker)
-        else:
-            return {"executable": False, "location": "not_reflected"}
+    dom_body = _body_window_for_dom(body, payload_value, marker)
+    rel_idx = dom_body.find(payload_value)
+    if rel_idx == -1 and marker:
+        rel_idx = dom_body.find(marker)
+    if rel_idx < 0:
+        return {"executable": False, "location": "not_reflected"}
 
-    try:
-        soup = BeautifulSoup(body, 'lxml')
-        texts = soup.find_all(string=True)
-        for text_node in texts:
-            if payload_value in text_node or (marker and marker in text_node):
-                parent_tag = text_node.parent.name if text_node.parent else ""
-                if parent_tag not in ['script', 'style', 'iframe']:
-                    return {"executable": False, "location": "safe_text_node"}
-    except Exception:
-        pass
+    if get_fuzzer_runtime_config().stored_xss.use_dom_parser:
+        try:
+            soup = BeautifulSoup(dom_body, 'lxml')
+            texts = soup.find_all(string=True)
+            for text_node in texts:
+                if payload_value in text_node or (marker and marker in text_node):
+                    parent_tag = text_node.parent.name if text_node.parent else ""
+                    if parent_tag not in ['script', 'style', 'iframe']:
+                        return {"executable": False, "location": "safe_text_node"}
+        except Exception:
+            pass
 
-    html_before_payload = body[:payload_idx]
+    html_before_payload = dom_body[:rel_idx]
     recent_html = html_before_payload[-500:] if len(html_before_payload) > 500 else html_before_payload
 
     last_open_tag = recent_html.rfind('<')
@@ -951,7 +1010,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             if quote_char in payload_value or '>' in payload_value:
                 return {"executable": True, "location": "attribute_breakout"}
             else:
-                exec_check = _check_executable_in_response(body, payload_value, marker)
+                exec_check = _check_executable_in_response(dom_body, payload_value, marker)
                 if exec_check["executable"]:
                     return {
                         "executable": True,
@@ -972,7 +1031,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
     if parser.in_script:
         script_start_idx = html_before_payload.rfind('<script')
         if script_start_idx != -1:
-            js_content = body[script_start_idx:payload_idx]
+            js_content = dom_body[script_start_idx:rel_idx]
             clean_js = _JS_COMMENT_SAFE_PATTERN.sub('', js_content)
 
             single_quotes = clean_js.count("'") - clean_js.count("\\'")
@@ -989,7 +1048,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             else:
                 return {"executable": True, "location": "script_code_area"}
 
-    exec_check = _check_executable_in_response(body, payload_value, marker)
+    exec_check = _check_executable_in_response(dom_body, payload_value, marker)
     if exec_check["executable"]:
         return {
             "executable": True,
@@ -1102,7 +1161,9 @@ def analyze_stored_xss(
         )
         return result
 
-    response_body = response.text[:MAX_RESPONSE_LENGTH]
+    raw_text = response.text or ""
+    analyze_max = get_analyze_body_max()
+    response_body = raw_text[:analyze_max] if len(raw_text) > analyze_max else raw_text
     payload_value = (payload.value or "")[:MAX_PAYLOAD_LENGTH] if payload.value else ""
 
     if not payload_value:
@@ -1110,23 +1171,25 @@ def analyze_stored_xss(
         return result
 
     marker = _extract_injected_marker(payload_value)
+    reflected = payload_value in response_body or bool(marker and marker in response_body)
 
-    if _is_waf_blocked(response, original_res, baseline):
+    waf_original = original_res if baseline is None else None
+    if _is_waf_blocked(response, waf_original, baseline):
         result["waf_blocked"] = True
         result["context"] = "waf_blocked"
         return result
 
-    if _DOM_SINK_PATTERN.search(response_body):
+    if reflected and _DOM_SINK_PATTERN.search(response_body):
         result["needs_manual_dom_review"] = True
 
-    if _is_safely_escaped(response_body, payload_value):
+    if reflected and _is_safely_escaped(response_body, payload_value):
         result["context"] = "safely_escaped"
         result["evidence"] = "Payload was HTML-escaped"
         return result
 
     response_headers = getattr(response, "headers", None)
 
-    if payload_value in response_body or (marker and marker in response_body):
+    if reflected:
         if is_immediate_reflection_only_hit(surface, response, payload_value, marker):
             result["context"] = "reflected_only_not_stored"
             result["evidence"] = (
@@ -1157,7 +1220,9 @@ def analyze_stored_xss(
         result["evidence"] = "Dangerous handlers bypassed escaping"
         return result
 
-    baseline_body = baseline[:MAX_RESPONSE_LENGTH] if baseline else None
+    sx, global_max = _stored_xss_limits()
+    baseline_cap = sx.resolved_baseline_bytes(global_max)
+    baseline_body = baseline[:baseline_cap] if baseline else None
     if _check_obfuscated_reflection(response_body, payload_value, baseline_body):
         result["is_vulnerable"] = True
         result["context"] = "obfuscated_reflection"
