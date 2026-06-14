@@ -553,6 +553,28 @@ def _view_templates_for_surface(
     return templates
 
 
+def collect_detail_urls_from_list_response(
+    body: str,
+    *,
+    base_url: str,
+    surface: Any = None,
+    injection_body: str = "",
+    surface_url: str = "",
+    max_items: int = 5,
+) -> list[str]:
+    """목록 API 응답 1건에서 detail view URL만 추출 (본문 캐시 없이 즉시 처리)."""
+    extra_templates = _view_templates_for_surface(
+        surface, base_url, injection_body, surface_url
+    )
+    return extract_json_resource_detail_urls(
+        body,
+        base_url,
+        surface_url=surface_url,
+        extra_view_templates=extra_templates,
+        max_items=max_items,
+    )
+
+
 def expand_detail_urls_from_list_bodies(
     list_bodies: list[tuple[str, str]],
     *,

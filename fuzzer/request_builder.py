@@ -15,6 +15,7 @@ import aiohttp
 from core.models import AttackSurface, ParamLocation
 
 from fuzzer.auth_provider import ScanAuthProvider
+from fuzzer.runtime_config import get_fuzzer_runtime_config
 from modules.file_upload.form_helpers import fill_upload_form_defaults
 
 _DYNAMIC_TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
@@ -198,6 +199,8 @@ class FuzzerResponse:
     elapsed_time: float
     url: str
     error: str | None = None
+    truncated: bool = False
+    body_bytes_read: int = 0
 
     @property
     def elapsed(self) -> float:
@@ -206,6 +209,41 @@ class FuzzerResponse:
         Older code may still access `response.elapsed`.
         """
         return self.elapsed_time
+
+
+async def _read_response_body_limited(
+    response: aiohttp.ClientResponse,
+    *,
+    max_bytes: int | None,
+) -> tuple[str, bool, int]:
+    """
+    Read response bytes up to max_bytes (None = read full body).
+    Returns (text, truncated, bytes_read).
+    """
+    if max_bytes is None:
+        data = await response.read()
+        return data.decode("utf-8", errors="replace"), False, len(data)
+
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        if not chunk:
+            continue
+        remaining = max_bytes - total
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(chunk) > remaining:
+            chunks.append(chunk[:remaining])
+            total += remaining
+            truncated = True
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+
+    body = b"".join(chunks)
+    return body.decode("utf-8", errors="replace"), truncated, total
 
 
 class _TokenExtractor(HTMLParser):
@@ -279,8 +317,12 @@ async def fetch_dynamic_tokens(
         request_kwargs["cookies"] = cookies
 
     try:
+        max_body = get_fuzzer_runtime_config().max_response_body_bytes
         async with session.get(surface.url, **request_kwargs) as response:
-            html = await response.text(errors="replace")
+            html, _, _ = await _read_response_body_limited(
+                response,
+                max_bytes=max_body,
+            )
     except Exception as exc:
         print(f"[request-builder] dynamic token refresh failed: {exc}")
         return {}
@@ -361,8 +403,12 @@ async def _send_prepared_request(
 ) -> FuzzerResponse:
     start_time = time.monotonic()
     try:
+        max_body = get_fuzzer_runtime_config().max_response_body_bytes
         async with session.request(method, url, allow_redirects=allow_redirects, **request_kwargs) as response:
-            text = await response.text(errors="replace")
+            text, truncated, bytes_read = await _read_response_body_limited(
+                response,
+                max_bytes=max_body,
+            )
             elapsed = time.monotonic() - start_time
             return FuzzerResponse(
                 status=response.status,
@@ -370,6 +416,8 @@ async def _send_prepared_request(
                 headers=dict(response.headers),
                 elapsed_time=elapsed,
                 url=str(response.url),
+                truncated=truncated,
+                body_bytes_read=bytes_read,
             )
     except asyncio.TimeoutError:
         elapsed = time.monotonic() - start_time

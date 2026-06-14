@@ -2,15 +2,23 @@ import logging
 from urllib.parse import unquote
 from modules.lfi.payloads import LFIPayload
 from modules.lfi.signatures import LFI_ERROR_SIGNATURES, LFI_SIGNATURES
+from fuzzer.runtime_config import clamp_text, get_fuzzer_runtime_config
 
 logger = logging.getLogger(__name__)
+
+
+def _lfi_analysis_text(response) -> str:
+    cfg = get_fuzzer_runtime_config()
+    cap = cfg.lfi.resolved_analyze_bytes(cfg.max_response_body_bytes)
+    return clamp_text(getattr(response, "text", "") or "", cap)
+
 
 def detect_lfi(response, payload, elapsed_time) -> tuple[bool, list[str]]:
     if not isinstance(payload, LFIPayload):
         return False, []
 
     evidences: list[str] = []
-    res_text = response.text or ""
+    res_text = _lfi_analysis_text(response)
     response_url = str(getattr(response, "url", "") or "")
     target_file = payload.expected_file
 
