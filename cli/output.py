@@ -9,25 +9,53 @@ async def progress_printer(
     engine: FuzzerEngine,
     total_requests: int,
     scan_task: asyncio.Task,
+    *,
+    overall_total: int | None = None,
+    baseline_completed: int = 0,
+    label: str = "",
 ) -> None:
+    """Pipeline mode: pass overall_total + baseline_completed for cumulative progress."""
     last_shown = 0.0
+    prefix = f"{label} " if label else ""
+
     while not scan_task.done():
-        effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
-        completed = engine.stats.completed
+        if overall_total is not None:
+            completed = baseline_completed + engine.stats.completed
+            effective_total = max(
+                overall_total,
+                baseline_completed + engine.stats.queued,
+                completed,
+                1,
+            )
+        else:
+            effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
+            completed = engine.stats.completed
+
         raw = min(99.9, (completed / effective_total) * 100)
         last_shown = max(last_shown, raw)
         print(
-            f"\rProgress: {last_shown:6.2f}% ({completed}/{effective_total})",
+            f"\r{prefix}Progress: {last_shown:6.2f}% ({completed}/{effective_total})",
             end="",
             flush=True,
         )
         await asyncio.sleep(0.2)
 
-    effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
-    completed = engine.stats.completed
-    percent = 100.0
+    if overall_total is not None:
+        completed = baseline_completed + engine.stats.completed
+        effective_total = max(
+            overall_total,
+            baseline_completed + engine.stats.queued,
+            completed,
+            1,
+        )
+        percent = min(100.0, (completed / effective_total) * 100)
+    else:
+        effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
+        completed = engine.stats.completed
+        percent = 100.0
+
     print(
-        f"\rProgress: {percent:6.2f}% ({completed}/{effective_total})",
+        f"\r{prefix}Progress: {percent:6.2f}% ({completed}/{effective_total})",
         end="",
         flush=True,
     )

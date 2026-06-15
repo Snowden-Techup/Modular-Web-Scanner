@@ -17,11 +17,22 @@ _STORED_XSS_CLASS = "stored_xss"
 _REFLECTED_XSS_CLASS = "Reflected XSS"
 _RXSS_MODULE_NAME = "rxss"
 
-# Consolidated File Upload report classes (group 12+ fixed + Bypass_* variants).
-_FILE_UPLOAD_WEBSHELL = "FileUpload-Webshell"
-_FILE_UPLOAD_STORED_XSS = "FileUpload-StoredXSS"
-_FILE_UPLOAD_PATH_TRAVERSAL = "FileUpload-PathTraversal"
-_FILE_UPLOAD_TEMPLATE = "FileUpload-TemplateInjection"
+_FILE_UPLOAD_MODULE_NAME = "File Upload"
+_FILE_UPLOAD_CLASS = "File Upload"
+_FILE_UPLOAD_ATTACK_PREFIXES = ("Bypass_", "Magic_Byte", "Classic_")
+_FILE_UPLOAD_ATTACK_TYPES = frozenset(
+    {
+        "Null_Byte_Injection_PHP",
+        "Double_Extension_PHP",
+        "Stored_XSS_SVG",
+        "Stored_XSS_HTML",
+        "Path_Traversal_File_Write",
+        "Template_Overwrite_EJS",
+    }
+)
+_LFI_MODULE_NAME = "LFI"
+_SSTI_MODULE_NAME = "ssti"
+_SSTI_CLASS = "SSTI"
 
 _SQLI_REPORT_TYPES = frozenset(
     {"SQLi-error_based", "SQLi-boolean_blind", "SQLi-time_blind"}
@@ -32,6 +43,43 @@ _LFI_REPORT_TYPES = frozenset(
         "LFI_Basic_Windows",
         "LFI_PHP_Wrapper",
         "LFI_RCE_Wrapper",
+    }
+)
+
+# SSRF payload attack_type values (config/payloads/ssrf/*). Used when module/ssrf_channel
+# are missing from flat DB rows so bypass_ipv6, file_read, etc. still group as SSRF-Internal.
+_SSRF_ATTACK_TYPES = frozenset(
+    {
+        "basic",
+        "bypass_cidr",
+        "bypass_decimal",
+        "bypass_domain",
+        "bypass_encoding",
+        "bypass_ipv6",
+        "bypass_ipv6_hostname",
+        "bypass_octal",
+        "bypass_rare",
+        "bypass_unicode",
+        "cloud_api",
+        "cloud_bypass",
+        "cloud_metadata",
+        "cloud_redirect",
+        "cloud_runtime",
+        "dns_rebinding",
+        "docker_api",
+        "file_read",
+        "http_probe",
+        "jar_scheme",
+        "k8s_etcd",
+        "oob_candidate",
+        "parser_confusion",
+        "php_filter_bypass",
+        "protocol_smuggling",
+        "rancher_metadata",
+        "redirect_bypass",
+        "time_blind",
+        "upgrade_to_xss",
+        "verify_probe",
     }
 )
 
@@ -88,12 +136,23 @@ def _raw_attack_type(record: dict[str, Any]) -> str:
     return str(attack.get("type") or "").strip()
 
 
+def _canonical_ssrf_attack_base(record: dict[str, Any]) -> str:
+    return canonical_attack_type_for_grouping(_raw_attack_type(record))
+
+
+def _is_ssrf_by_attack_type(record: dict[str, Any]) -> bool:
+    return _canonical_ssrf_attack_base(record) in _SSRF_ATTACK_TYPES
+
+
 def _is_ssrf_record(record: dict[str, Any]) -> bool:
-    return _module_name(record) == SSRF_MODULE_REPORT_NAME
+    return _module_name(record) == SSRF_MODULE_REPORT_NAME or _is_ssrf_by_attack_type(record)
 
 
 def _is_oob_ssrf_record(record: dict[str, Any]) -> bool:
-    return record.get("ssrf_channel") == "oob"
+    if record.get("ssrf_channel") == "oob":
+        return True
+    # OOB-only payload labels when channel metadata was not persisted (e.g. flat DB rows).
+    return _canonical_ssrf_attack_base(record) in {"upgrade_to_xss", "cloud_redirect"}
 
 
 def _is_inband_ssrf_record(record: dict[str, Any]) -> bool:
@@ -110,22 +169,44 @@ def _ssrf_report_type(record: dict[str, Any]) -> str:
     return _SSRF_INTERNAL_CLASS
 
 
-def _file_upload_report_type(raw_type: str) -> str:
+def _is_file_upload_by_attack_type(record: dict[str, Any]) -> bool:
+    base = canonical_attack_type_for_grouping(_raw_attack_type(record))
+    if base in _FILE_UPLOAD_ATTACK_TYPES:
+        return True
+    return any(base.startswith(prefix) for prefix in _FILE_UPLOAD_ATTACK_PREFIXES)
+
+
+def _is_file_upload_record(record: dict[str, Any]) -> bool:
+    return _module_name(record) == _FILE_UPLOAD_MODULE_NAME or _is_file_upload_by_attack_type(record)
+
+
+def _is_lfi_by_attack_type(record: dict[str, Any]) -> bool:
+    base = canonical_attack_type_for_grouping(_raw_attack_type(record))
+    return base.startswith("LFI_") or base in _LFI_REPORT_TYPES
+
+
+def _lfi_report_type(raw_type: str) -> str:
     base = canonical_attack_type_for_grouping(raw_type)
-    if base.startswith("Bypass_"):
-        return _FILE_UPLOAD_WEBSHELL
-    if base in {"Stored_XSS_SVG", "Stored_XSS_HTML"}:
-        return _FILE_UPLOAD_STORED_XSS
-    if base == "Path_Traversal_File_Write":
-        return _FILE_UPLOAD_PATH_TRAVERSAL
-    if base == "Template_Overwrite_EJS":
-        return _FILE_UPLOAD_TEMPLATE
-    if base.startswith("Magic_Byte") or base in {
-        "Null_Byte_Injection_PHP",
-        "Double_Extension_PHP",
-    }:
-        return _FILE_UPLOAD_WEBSHELL
-    return _FILE_UPLOAD_WEBSHELL
+    if base in _LFI_REPORT_TYPES:
+        return base
+    if base.startswith("LFI_"):
+        if "Windows" in base:
+            return "LFI_Basic_Windows"
+        if "PHP" in base or "Wrapper" in base:
+            return "LFI_PHP_Wrapper"
+        if "RCE" in base:
+            return "LFI_RCE_Wrapper"
+        return "LFI_Basic_Linux"
+    return "LFI"
+
+
+def _is_ssti_by_attack_type(record: dict[str, Any]) -> bool:
+    raw = _raw_attack_type(record).lower()
+    return raw.startswith("ssti") or raw.startswith("ssti:")
+
+
+def _is_ssti_record(record: dict[str, Any]) -> bool:
+    return _module_name(record) == _SSTI_MODULE_NAME or _is_ssti_by_attack_type(record)
 
 
 def _osci_report_type(raw_type: str) -> str:
@@ -174,8 +255,17 @@ def report_attack_type(record: dict[str, Any]) -> str:
     if _is_reflected_xss_record(record) or base_type.lower().startswith("reflected_xss"):
         return _REFLECTED_XSS_CLASS
 
-    if module == "File Upload":
-        return _file_upload_report_type(raw_type)
+    if _is_file_upload_record(record):
+        return _FILE_UPLOAD_CLASS
+
+    if _is_ssti_record(record):
+        return _SSTI_CLASS
+
+    if base_type.upper().startswith("OOB-SQLI"):
+        return _OOB_SQLI_CLASS
+
+    if module == _LFI_MODULE_NAME or _is_lfi_by_attack_type(record):
+        return _lfi_report_type(raw_type)
 
     if base_type in _SQLI_REPORT_TYPES or base_type.startswith("SQLi-"):
         if base_type in _SQLI_REPORT_TYPES:
@@ -187,9 +277,6 @@ def report_attack_type(record: dict[str, Any]) -> str:
             return "SQLi-boolean_blind"
         if "time" in lowered:
             return "SQLi-time_blind"
-
-    if base_type in _LFI_REPORT_TYPES:
-        return base_type
 
     if raw_type in {"in-band", "time-based"}:
         return _osci_report_type(raw_type)
@@ -215,8 +302,11 @@ def presentation_for_vulnerability_record(record: dict[str, Any]) -> dict[str, A
         attack["type"] = report_type
     if original and report_type and original != report_type:
         attack["attack_variant"] = original
-        if _is_ssrf_record(out):
+        preview = {**out, "attack_info": {**attack, "type": original}}
+        if _is_ssrf_record(preview) or _is_ssrf_by_attack_type(preview):
             attack["ssrf_variant"] = original
+        if _is_file_upload_record(preview):
+            attack["upload_variant"] = original
     return out
 
 
@@ -226,7 +316,7 @@ def vulnerability_group_key(record: dict[str, Any]) -> tuple[str, str, str, str,
 
     Uses consolidated report types (``report_attack_type``), e.g. in-band SSRF ->
     ``SSRF-Internal``, OOB SSRF -> ``SSRF-OOB``, File Upload bypass variants ->
-    ``FileUpload-Webshell``.
+    ``File Upload``.
     """
     target = record.get("target") or {}
     return (

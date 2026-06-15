@@ -38,12 +38,21 @@ def _oob_module_kwargs(args) -> dict:
 
 def _module_defs(args) -> list[_ModuleDef]:
     """
-    `-t all` 파이프라인 순서 = 아래 목록 순서.
-    sqli / oob_sqli 는 의도적으로 맨 마지막에 실행한다.
+    `-t all` 파이프라인 순서 = 아래 목록 순서 (웹 UI 공격 모듈 드롭다운과 동일, bruteforce 제외).
     새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
     """
     oob_kwargs = _oob_module_kwargs(args)
     return [
+        (
+            "sqli",
+            ("sqli", "all"),
+            lambda: SQLiModule(
+                include_time_based=args.sqli_time_based,
+                max_time_payloads=args.sqli_time_max,
+                evasion_level=args.sqli_evasion_level,
+                target_dbms=args.target_dbms,
+            ),
+        ),
         (
             "osci",
             ("osci", "all"),
@@ -52,6 +61,15 @@ def _module_defs(args) -> list[_ModuleDef]:
                 max_time_payloads=args.osci_time_max,
                 evasion_level=args.osci_evasion_level,
                 target_os=args.target_os,
+            ),
+        ),
+        (
+            "oob_sqli",
+            ("oob_sqli", "all"),
+            lambda: OOB_SQLiModule(
+                target_dbms=args.target_dbms,
+                evasion_level=args.sqli_evasion_level,
+                **oob_kwargs,
             ),
         ),
         (
@@ -105,25 +123,6 @@ def _module_defs(args) -> list[_ModuleDef]:
             lambda: SSTIModule(
                 evasion_level=getattr(args, "ssti_evasion_level", 0),
                 max_payloads=getattr(args, "ssti_max_payloads", None),
-            ),
-        ),
-        (
-            "sqli",
-            ("sqli", "all"),
-            lambda: SQLiModule(
-                include_time_based=args.sqli_time_based,
-                max_time_payloads=args.sqli_time_max,
-                evasion_level=args.sqli_evasion_level,
-                target_dbms=args.target_dbms,
-            ),
-        ),
-        (
-            "oob_sqli",
-            ("oob_sqli", "all"),
-            lambda: OOB_SQLiModule(
-                target_dbms=args.target_dbms,
-                evasion_level=args.sqli_evasion_level,
-                **oob_kwargs,
             ),
         ),
     ]

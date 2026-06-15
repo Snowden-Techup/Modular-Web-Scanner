@@ -1313,7 +1313,7 @@
             <strong id="statTotal">—</strong>
           </div>
           <div class="progress-stat">
-            <span class="muted">성공</span>
+            <span class="muted">완료</span>
             <strong id="statSuccess">—</strong>
           </div>
           <div class="progress-stat">
@@ -1498,12 +1498,28 @@
       return headers;
     }
 
+    function formatScanCount(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return "—";
+      return n.toLocaleString("ko-KR");
+    }
+
     function formatProgressPercent(scan) {
-      const p = scan.progress_percent;
-      if (typeof p === "number" && !Number.isNaN(p)) return `${p.toFixed(1)}%`;
-      const q = scan.progress;
-      if (typeof q === "number" && !Number.isNaN(q)) return `${Number(q).toFixed(1)}%`;
-      return "0.0%";
+      const { planned, completed } = resolveProgressTotals(scan);
+      let pct = 0;
+      if (planned > 0) {
+        pct = Math.min(100, Math.round((completed / planned) * 1000) / 10);
+      } else if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
+        pct = scan.progress_percent;
+      } else {
+        pct = Number(scan.progress ?? 0);
+      }
+      if (scan.status === "running") {
+        pct = Math.max(displayedProgressPercent, pct);
+      } else if (scan.status === "completed") {
+        pct = 100;
+      }
+      return `${Math.min(100, Math.max(0, pct)).toFixed(1)}%`;
     }
 
     function resolveProgressTotals(scan) {
@@ -1511,35 +1527,47 @@
       const planned = Number(
         sum.planned_requests ?? scan.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0
       );
-      const queued = Number(sum.queued ?? 0);
+      const observed = Number(sum.observed_total ?? 0);
       const completed = Number(sum.completed ?? 0);
       const failures = Number(sum.failures ?? 0);
-      const effectiveTotal = Math.max(
-        Number.isNaN(planned) ? 0 : planned,
-        Number.isNaN(queued) ? 0 : queued,
-        completed,
-        1
+      const plannedSafe = Number.isNaN(planned) ? 0 : planned;
+      const observedSafe = Number.isNaN(observed) ? 0 : observed;
+      const completedSafe = Number.isNaN(completed) ? 0 : completed;
+      const failuresSafe = Number.isNaN(failures) ? 0 : failures;
+      const observedExcess = observedSafe > plannedSafe && plannedSafe > 0
+        ? observedSafe - plannedSafe
+        : 0;
+      return {
+        planned: plannedSafe,
+        observed: observedSafe,
+        completed: completedSafe,
+        failures: failuresSafe,
+        observedExcess,
+      };
+    }
+
+    function hasFuzzingActivity(scan) {
+      const sum = scan.summary || {};
+      return (
+        sum.phase === "fuzzing"
+        || Number(sum.module_index ?? 0) > 0
+        || Number(sum.completed ?? 0) > 0
+        || Number(sum.findings ?? 0) > 0
+        || Number(sum.planned_requests ?? sum.total_requests ?? scan.total_requests ?? 0) > 0
+        || Number(sum.surface_count ?? 0) > 0
+        || (typeof scan.progress_percent === "number" && scan.progress_percent > 0)
+        || (Array.isArray(scan.report_json?.vulnerabilities) && scan.report_json.vulnerabilities.length > 0)
+        || (Array.isArray(scan.findings) && scan.findings.length > 0)
       );
-      const success = Math.min(
-        Math.max(0, completed - failures),
-        effectiveTotal
-      );
-      return { effectiveTotal, completed, failures, success };
     }
 
     function resolveScanPhase(scan) {
       const phase = scan.summary?.phase;
-      if (phase === "crawling") return "crawling";
       if (phase === "queued" || scan.status === "queued") return "queued";
-      if (
-        scan.status === "running"
-        && scan.summary?.phase !== "fuzzing"
-        && !scan.total_requests
-        && Number(scan.summary?.completed ?? 0) === 0
-        && !(typeof scan.progress_percent === "number" && scan.progress_percent > 0)
-      ) {
-        return "crawling";
-      }
+      if (scan.status === "running" && hasFuzzingActivity(scan)) return "fuzzing";
+      if (phase === "fuzzing" || hasFuzzingActivity(scan)) return "fuzzing";
+      if (phase === "crawling") return "crawling";
+      if (scan.status === "running") return "crawling";
       return phase || scan.status || "";
     }
 
@@ -1558,13 +1586,13 @@
       const isPreFuzzing = phase === "crawling" || phase === "queued";
 
       if (isPreFuzzing) {
-        displayedProgressPercent = 0;
         scanPhaseLabel.hidden = false;
         scanPhaseLabel.textContent = phase === "queued" ? "대기 중" : "크롤링 중";
         scanProgressPercent.textContent = "—";
         scanProgressFill.style.width = "0%";
         scanProgressTrack.setAttribute("aria-valuenow", "0");
         statTotal.textContent = "—";
+        statTotal.title = "";
         statSuccess.textContent = "—";
         statFail.textContent = "—";
         progressStats.classList.add("is-pre-fuzzing");
@@ -1584,24 +1612,27 @@
       }
       progressStats.classList.remove("is-pre-fuzzing");
 
-      const { effectiveTotal, completed, failures, success } = resolveProgressTotals(scan);
+      const { planned, completed, failures, observedExcess } = resolveProgressTotals(scan);
 
-      statTotal.textContent = String(effectiveTotal);
-      statSuccess.textContent = String(success);
-      statFail.textContent = String(failures);
+      statTotal.textContent = planned > 0 ? formatScanCount(planned) : "—";
+      statTotal.title = observedExcess > 0
+        ? `실측 ${formatScanCount(planned + observedExcess)}건 (예상보다 +${formatScanCount(observedExcess)}건)`
+        : "";
+      statSuccess.textContent = formatScanCount(completed);
+      statFail.textContent = formatScanCount(failures);
 
       let pct = 0;
-      if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
+      if (planned > 0) {
+        pct = Math.min(100, Math.round((completed / planned) * 1000) / 10);
+      } else if (typeof scan.progress_percent === "number" && !Number.isNaN(scan.progress_percent)) {
         pct = scan.progress_percent;
-      } else if (effectiveTotal > 0) {
-        pct = Math.min(100, Math.round((completed / effectiveTotal) * 1000) / 10);
       } else {
         pct = Number(scan.progress ?? 0);
       }
       if (scan.status === "completed") {
         pct = 100;
         displayedProgressPercent = 100;
-      } else {
+      } else if (scan.status === "running") {
         pct = Math.max(displayedProgressPercent, pct);
         displayedProgressPercent = pct;
       }
@@ -1958,6 +1989,15 @@
       renderScanHistoryList();
       try {
         const data = await requestJson(`/api/scan/${scanId}`);
+        if (data.status === "running" || data.status === "queued") {
+          displayedProgressPercent = Math.max(
+            displayedProgressPercent,
+            Number(data.progress_percent ?? data.progress ?? 0) || 0
+          );
+        } else {
+          displayedProgressPercent = data.status === "completed" ? 100 : 0;
+        }
+        updateScanProgressUI(data);
         renderReport(data);
       } catch (err) {
         findingList.innerHTML = `<div class="muted">리포트 불러오기 실패: ${escapeHtml(String(err))}</div>`;
@@ -2192,4 +2232,5 @@
     });
   </script>
 </body>
+</html>
 </html>
