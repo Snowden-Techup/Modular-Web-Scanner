@@ -9,7 +9,6 @@ from pathlib import Path
 import aiohttp
 
 from cli.output import print_scan_configuration, progress_printer
-from fuzzer.runtime_config import apply_module_runtime_policy
 from fuzzer import EngineStats, FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request, FuzzerResponse
@@ -188,7 +187,6 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
 
 
 async def _run_scan_single(args, *, base_url: str, surfaces) -> None:
-    apply_module_runtime_policy(args.type)
     context = prepare_scan_context(args, surfaces)
     if context is None:
         return
@@ -300,7 +298,6 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
         for idx, module_type in enumerate(pipeline_types, 1):
             mod_args = copy.copy(args)
             mod_args.type = module_type
-            apply_module_runtime_policy(module_type)
 
             context = prepare_scan_context(mod_args, surfaces)
             if context is None or module_totals.get(module_type, 0) == 0:

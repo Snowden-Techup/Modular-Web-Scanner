@@ -26,14 +26,13 @@ from modules.stored_xss.analyzer import (
     surface_method_is_get,
     verify_context_matches_parameter,
     verify_implies_persistent_storage,
-    get_analyze_body_max,
 )
 from modules.stored_xss.verify_urls import (
     collect_verify_candidate_urls,
     collect_detail_urls_from_list_response,
     infer_list_poll_urls,
 )
-from fuzzer.request_builder import build_and_send_request, _read_response_body_limited
+from fuzzer.request_builder import build_and_send_request
 from fuzzer.runtime_config import get_fuzzer_runtime_config
 
 
@@ -98,18 +97,6 @@ def _clone_surface_for_verify(surface: Any) -> Any:
         if isinstance(value, dict):
             setattr(cloned, attr, dict(value))
     return cloned
-
-
-async def _bounded_response_text(
-    response: aiohttp.ClientResponse,
-    *,
-    max_bytes: int | None = None,
-) -> str:
-    if max_bytes is None:
-        cfg = get_fuzzer_runtime_config()
-        max_bytes = cfg.stored_xss.resolved_verify_bytes(cfg.max_response_body_bytes)
-    text, _, _ = await _read_response_body_limited(response, max_bytes=max_bytes)
-    return text
 
 
 def _stored_xss_runtime():
@@ -178,9 +165,7 @@ class StoredXSSModule(BaseModule):
 
     def set_baseline(self, response: Any) -> None:
         if response and hasattr(response, 'text') and response.text:
-            cfg = get_fuzzer_runtime_config()
-            cap = cfg.stored_xss.resolved_baseline_bytes(cfg.max_response_body_bytes)
-            self._baseline_response = response.text[:cap]
+            self._baseline_response = response.text
 
     def reload_database(self) -> None:
         reload_payloads()
@@ -284,8 +269,6 @@ class StoredXSSModule(BaseModule):
             baseline_text = self._baseline_response
             if not baseline_text and original_res and hasattr(original_res, 'text'):
                 baseline_text = original_res.text
-            if baseline_text:
-                baseline_text = baseline_text[:get_analyze_body_max()]
 
             result = analyze_stored_xss(
                 response,
@@ -367,9 +350,6 @@ class StoredXSSModule(BaseModule):
             req_headers = getattr(surface, "headers", {}) or {}
             prefers_json = surface_expects_json_api(safe_surface)
             sx_cfg = _stored_xss_runtime()
-            cfg = get_fuzzer_runtime_config()
-            verify_body_cap = sx_cfg.resolved_verify_bytes(cfg.max_response_body_bytes)
-            baseline_cap = sx_cfg.resolved_baseline_bytes(cfg.max_response_body_bytes)
 
             candidate_urls = collect_verify_candidate_urls(
                 base_url=base_url,
@@ -380,7 +360,7 @@ class StoredXSSModule(BaseModule):
 
             await asyncio.sleep(1.0 if prefers_json else 0.75)
 
-            injection_body = (getattr(injection_res, "text", "") or "")[:baseline_cap]
+            injection_body = getattr(injection_res, "text", "") or ""
             list_poll_urls = (
                 infer_list_poll_urls(safe_surface, base_url, injection_body)
                 if prefers_json
@@ -401,9 +381,7 @@ class StoredXSSModule(BaseModule):
                     ) as list_res:
                         if not is_success_status(list_res.status):
                             continue
-                        list_text = await _bounded_response_text(
-                            list_res, max_bytes=verify_body_cap
-                        )
+                        list_text = await list_res.text(errors="replace")
                         for detail_url in collect_detail_urls_from_list_response(
                             list_text,
                             base_url=base_url,
@@ -442,9 +420,7 @@ class StoredXSSModule(BaseModule):
                             verify_status = verify_res.status
                             if not is_success_status(verify_status):
                                 continue
-                            verify_body = await _bounded_response_text(
-                                verify_res, max_bytes=verify_body_cap
-                            )
+                            verify_body = await verify_res.text(errors="replace")
                             verify_response_headers = {
                                 str(k): str(v) for k, v in verify_res.headers.items()
                             }
