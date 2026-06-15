@@ -243,16 +243,8 @@ class StoredXSSModule(BaseModule):
             return []
 
     def get_payload_count(self) -> int:
-        if self._cached_payloads is not None:
-            return len(self._cached_payloads)
-        from modules.stored_xss.payloads import get_payload_count as get_db_count
-        counts = get_db_count()
-        if self.scan_mode == ScanMode.QUICK:
-            return counts.get("basic", 0) + counts.get("event_handler", 0)
-        raw_cats = self.categories
-        if raw_cats:
-            return sum(counts.get(c, 0) for c in raw_cats)
-        return sum(counts.values())
+        # Must match get_payloads() (mutation_level, categories, risk filter).
+        return len(self.get_payloads())
 
     def analyze(
             self,
