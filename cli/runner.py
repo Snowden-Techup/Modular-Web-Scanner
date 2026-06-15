@@ -7,6 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
+from cli.output import print_scan_configuration, progress_printer
 from fuzzer.runtime_config import apply_module_runtime_policy
 from fuzzer import EngineStats, FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
