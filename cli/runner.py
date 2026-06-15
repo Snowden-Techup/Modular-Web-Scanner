@@ -12,7 +12,13 @@ from cli.output import print_scan_configuration, progress_printer
 from fuzzer import EngineStats, FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request, FuzzerResponse
-from fuzzer.setup import count_module_payloads, estimate_total_requests, pipeline_module_types, select_modules
+from fuzzer.setup import (
+    build_pipeline_module_totals,
+    count_module_payloads,
+    estimate_total_requests,
+    pipeline_module_types,
+    select_modules,
+)
 from reporter import ReportGenerator
 from core.models import Payload 
 
@@ -273,14 +279,7 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
 
     pipeline_types = pipeline_module_types(args)
 
-    module_totals: dict[str, int] = {}
-    for mtype in pipeline_types:
-        mod_args = copy.copy(args)
-        mod_args.type = mtype
-        mods = select_modules(mod_args)
-        if mods:
-            module_totals[mtype] = estimate_total_requests(surfaces, mods)
-        del mods  # 추정용 모듈 인스턴스를 즉시 해제 (페이로드 캐시 포함)
+    module_totals = build_pipeline_module_totals(surfaces, args)
     overall_total = max(1, sum(module_totals.values()))
     n_modules = len([t for t in pipeline_types if module_totals.get(t, 0) > 0])
     cumulative_completed = 0
@@ -304,11 +303,19 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
                 print(f"\n[{idx}/{len(pipeline_types)}] {module_type}: skipped (no payloads/surfaces).")
                 continue
 
+            module_total = module_totals[module_type]
+            runtime_total = context["total_requests"]
+            if runtime_total != module_total:
+                print(
+                    f"[WARN] {module_type}: planned={module_total} runtime={runtime_total} "
+                    "(pipeline plan mismatch)"
+                )
+
             module_run_idx += 1
             print(f"\n{separator}")
             print(
                 f"[{module_run_idx}/{n_modules}] Module: {module_type}  "
-                f"({context['total_requests']} requests, "
+                f"({module_total} requests, "
                 f"overall {cumulative_completed}/{overall_total})"
             )
             print(separator)

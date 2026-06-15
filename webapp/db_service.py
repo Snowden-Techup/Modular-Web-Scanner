@@ -335,19 +335,35 @@ def update_scan_fields(scan_id: str, **fields) -> None:
         if scan is None:
             return
         if scan.status == "running":
+            incoming_summary = fields.get("summary") if isinstance(fields.get("summary"), dict) else None
+            old_summary = scan.summary or {}
+            planned_grew = False
+            if incoming_summary is not None:
+                old_planned = int(
+                    old_summary.get("planned_requests") or scan.total_requests or 0
+                )
+                new_planned = int(
+                    incoming_summary.get("planned_requests") or old_planned
+                )
+                planned_grew = new_planned > old_planned
             if "progress_percent" in fields:
                 incoming = float(fields["progress_percent"] or 0)
                 current = float(scan.progress_percent or 0)
-                # Allow explicit reset to 0 at fuzzing start; otherwise never regress.
-                fields["progress_percent"] = (
-                    incoming if incoming == 0 and current == 0 else max(current, incoming)
-                )
+                if planned_grew:
+                    fields["progress_percent"] = incoming
+                else:
+                    fields["progress_percent"] = (
+                        incoming if incoming == 0 and current == 0 else max(current, incoming)
+                    )
             if "progress" in fields:
                 incoming_p = int(fields["progress"] or 0)
                 current_p = int(scan.progress or 0)
-                fields["progress"] = (
-                    incoming_p if incoming_p == 0 and current_p == 0 else max(current_p, incoming_p)
-                )
+                if planned_grew:
+                    fields["progress"] = incoming_p
+                else:
+                    fields["progress"] = (
+                        incoming_p if incoming_p == 0 and current_p == 0 else max(current_p, incoming_p)
+                    )
         if "summary" in fields and isinstance(fields["summary"], dict):
             fields["summary"] = merge_scan_summary(scan.summary, fields["summary"])
         for key, value in fields.items():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from collections.abc import Callable
 from typing import Any
@@ -188,6 +189,30 @@ def _module_runtime_payload_count(module) -> int:
 
 def count_module_payloads(modules: list) -> int:
     return sum(_module_runtime_payload_count(m) for m in modules)
+
+
+def build_pipeline_module_totals(surfaces: list[AttackSurface], args) -> dict[str, int]:
+    """
+    `-t all` 파이프라인 전체 예상 요청 수를 모듈별로 계산한다.
+
+    런타임과 동일한 순서로 ``estimate_total_requests`` 를 돌리되, 공유
+    ``surfaces`` 를 오염시키지 않도록 별도 ``plan_surfaces`` 복제본만 갱신한다.
+    (사전 추정 중 stored_xss 가 surface.parameters 를 채우면 이후 모듈 예상치가
+    달라지므로, 런타임 surface 는 퍼징 시작 시점 그대로 유지해야 한다.)
+    """
+    plan_surfaces = copy.deepcopy(surfaces)
+    module_totals: dict[str, int] = {}
+    for mtype in pipeline_module_types(args):
+        mod_args = copy.copy(args)
+        mod_args.type = mtype
+        mods = select_modules(mod_args)
+        if not mods:
+            continue
+        total = estimate_total_requests(plan_surfaces, mods)
+        if total > 0:
+            module_totals[mtype] = total
+        del mods
+    return module_totals
 
 
 def estimate_total_requests(surfaces: list[AttackSurface], modules: list) -> int:
