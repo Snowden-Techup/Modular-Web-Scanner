@@ -163,16 +163,26 @@ def select_modules(args) -> list:
 
 
 def _module_runtime_payload_count(module) -> int:
-    """실제 실행 목록 기준(변형·필터 포함). get_payload_count()와 다를 수 있음."""
+    """실제 실행 목록 기준(변형·필터 포함).
+
+    get_payload_count()를 우선 시도해 전체 리스트 생성을 피한다.
+    없을 때만 get_payloads()를 호출해 len()으로 계산한다.
+    """
+    # 카운터 메서드가 있으면 리스트를 생성하지 않고 바로 반환
+    if hasattr(module, "get_payload_count"):
+        try:
+            count = module.get_payload_count()
+            if count is not None:
+                return max(0, int(count))
+        except Exception:
+            pass
+    # 폴백: 전체 리스트를 생성해 len()으로 계산 (메모리 비용 큼)
     if hasattr(module, "get_payloads"):
         payloads = module.get_payloads()
         try:
             return len(payloads)
         except TypeError:
-            # SQLi 등 Iterator 반환 모듈은 len() 불가 → get_payload_count() 사용
             pass
-    if hasattr(module, "get_payload_count"):
-        return module.get_payload_count()
     return 0
 
 
