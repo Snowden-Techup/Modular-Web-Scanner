@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import json
 import shutil
 import time
@@ -175,6 +176,18 @@ def _build_args_from_payload(payload: dict) -> Namespace:
     )
 
 
+def _release_finding_response_memory(findings: list) -> None:
+    """Drop large HTTP bodies from findings kept across pipeline modules."""
+    for finding in findings:
+        response = getattr(finding, "response", None)
+        if response is None:
+            continue
+        if hasattr(response, "text"):
+            response.text = ""
+        if hasattr(response, "headers"):
+            response.headers = {}
+
+
 def _serialize_findings(findings) -> list[dict]:
     from reporter.generator import _finding_sort_key
 
@@ -340,6 +353,7 @@ async def _async_run_scan_pipeline(
         mods = select_modules(mod_args)
         if mods:
             module_totals[mtype] = estimate_total_requests(surfaces, mods)
+        del mods
     overall_total = max(1, sum(module_totals.values()))
     n_modules = len([t for t in pipeline_types if module_totals.get(t, 0) > 0])
 
@@ -505,11 +519,12 @@ async def _async_run_scan_pipeline(
                 progress=int(last_shown_progress),
             )
 
-            # 모듈별 중간 리포트 저장
+            # 모듈별 중간 리포트 저장 (export 후 response 본문은 누적 목록에서 제거)
             module_output = runtime_output.with_name(
                 f"{runtime_output.stem}_{module_type}{runtime_output.suffix}"
             )
-            module_reporter = ReportGenerator(stats=stats, findings=engine.findings)
+            module_findings = engine.consume_findings()
+            module_reporter = ReportGenerator(stats=stats, findings=module_findings)
             await asyncio.to_thread(module_reporter.export_to_json, str(module_output))
             await _scan_log(
                 scan_id,
@@ -517,8 +532,14 @@ async def _async_run_scan_pipeline(
                 f"(findings={stats.findings}, report={module_output.name})",
             )
 
-            all_findings.extend(engine.findings)
-            all_pipeline_modules.extend(context["modules"])
+            _release_finding_response_memory(module_findings)
+            all_findings.extend(module_findings)
+            del module_findings
+            all_pipeline_modules.extend(
+                m for m in context["modules"] if hasattr(m, "generated_tokens")
+            )
+            del engine, context
+            gc.collect()
             if module_type in OOB_WEB_SCAN_TYPES:
                 scan_row = await asyncio.to_thread(get_scan_by_public_id, scan_id)
                 cumulative_findings = int((scan_row.summary or {}).get("findings", cumulative_findings))
@@ -870,12 +891,16 @@ async def _async_run_scan(scan_id: str, request_payload: dict) -> None:
         findings = findings_from_rows(await asyncio.to_thread(get_scan_findings_rows, scan_pk))
         deduped_findings_count = report_json["metadata"]["summary"]["findings_deduped"]
     else:
-        reporter = ReportGenerator(stats=stats, findings=engine.findings)
+        module_findings = engine.consume_findings()
+        reporter = ReportGenerator(stats=stats, findings=module_findings)
         await asyncio.to_thread(reporter.export_to_json, args.output)
         await _scan_log(scan_id, f"리포트 파일 저장: {args.output}")
         report_json = None
-        findings = _serialize_findings(engine.findings)
+        _release_finding_response_memory(module_findings)
+        findings = _serialize_findings(module_findings)
         deduped_findings_count = len(findings)
+        del module_findings, engine
+        gc.collect()
 
     archived_output = _archive_scan_report_path(scan_id)
     archived_output.parent.mkdir(parents=True, exist_ok=True)
