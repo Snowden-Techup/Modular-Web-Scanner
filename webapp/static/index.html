@@ -1544,6 +1544,9 @@
     }
 
     function hasFuzzingActivity(scan) {
+      if (scan.status === "completed" || scan.status === "failed") {
+        return false;
+      }
       const sum = scan.summary || {};
       return (
         sum.phase === "fuzzing"
@@ -1559,6 +1562,12 @@
     }
 
     function resolveScanPhase(scan) {
+      if (scan.status === "completed" || scan.summary?.phase === "completed") {
+        return "completed";
+      }
+      if (scan.status === "failed" || scan.summary?.phase === "failed") {
+        return "failed";
+      }
       const phase = scan.summary?.phase;
       if (phase === "queued" || scan.status === "queued") return "queued";
       if (scan.status === "running" && hasFuzzingActivity(scan)) return "fuzzing";
@@ -1569,18 +1578,21 @@
     }
 
     function formatStatusLabel(scan) {
+      if (scan.status === "completed") return "완료";
+      if (scan.status === "failed") return "실패";
       const phase = resolveScanPhase(scan);
       if (phase === "crawling") return "크롤링 중";
       if (phase === "queued") return "대기 중";
       if (phase === "fuzzing" || scan.status === "running") return "퍼징 중";
-      if (scan.status === "completed") return "완료";
-      if (scan.status === "failed") return "실패";
+      if (phase === "completed") return "완료";
+      if (phase === "failed") return "실패";
       return scan.status || "-";
     }
 
     function updateScanProgressUI(scan) {
       const phase = resolveScanPhase(scan);
       const isPreFuzzing = phase === "crawling" || phase === "queued";
+      const isTerminal = phase === "completed" || phase === "failed";
 
       if (isPreFuzzing) {
         scanPhaseLabel.hidden = false;
@@ -1599,7 +1611,10 @@
       const currentModule = scan.summary?.current_module;
       const moduleIndex = scan.summary?.module_index;
       const moduleCount = scan.summary?.module_count;
-      if (currentModule) {
+      if (isTerminal) {
+        scanPhaseLabel.hidden = false;
+        scanPhaseLabel.textContent = phase === "failed" ? "실패" : "완료";
+      } else if (currentModule) {
         scanPhaseLabel.hidden = false;
         scanPhaseLabel.textContent = moduleCount
           ? `${currentModule} [${moduleIndex}/${moduleCount}]`
