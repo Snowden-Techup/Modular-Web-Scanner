@@ -1004,7 +1004,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             if quote_char in payload_value or '>' in payload_value:
                 return {"executable": True, "location": "attribute_breakout"}
             else:
-                exec_check = _check_executable_in_response(dom_body, payload_value, marker)
+                exec_check = _check_executable_in_response(body, payload_value, marker)
                 if exec_check["executable"]:
                     return {
                         "executable": True,
@@ -1025,7 +1025,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
     if parser.in_script:
         script_start_idx = html_before_payload.rfind('<script')
         if script_start_idx != -1:
-            js_content = dom_body[script_start_idx:rel_idx]
+            js_content = body[script_start_idx:rel_idx]
             clean_js = _JS_COMMENT_SAFE_PATTERN.sub('', js_content)
 
             single_quotes = clean_js.count("'") - clean_js.count("\\'")
@@ -1042,7 +1042,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             else:
                 return {"executable": True, "location": "script_code_area"}
 
-    exec_check = _check_executable_in_response(dom_body, payload_value, marker)
+    exec_check = _check_executable_in_response(body, payload_value, marker)
     if exec_check["executable"]:
         return {
             "executable": True,
