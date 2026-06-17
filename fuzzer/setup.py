@@ -39,7 +39,7 @@ def _oob_module_kwargs(args) -> dict:
 
 def _module_defs(args) -> list[_ModuleDef]:
     """
-    `-t all` 파이프라인 순서 = 아래 목록 순서 (웹 UI 공격 모듈 드롭다운과 동일, bruteforce 제외).
+    `-t all` 파이프라인 순서 = 아래 목록 중 accepted에 `"all"` 포함 항목 (bruteforce·stored_xss 제외).
     새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
     """
     oob_kwargs = _oob_module_kwargs(args)
@@ -102,7 +102,7 @@ def _module_defs(args) -> list[_ModuleDef]:
         ),
         (
             "stored_xss",
-            ("stored_xss", "all"),
+            ("stored_xss",),
             lambda: StoredXSSModule(
                 bypass_level=getattr(args, "sxss_evasion_level", 1),
                 scan_mode=getattr(args, "sxss_scan_mode", "full"),
