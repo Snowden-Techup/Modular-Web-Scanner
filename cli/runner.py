@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import os
 from pathlib import Path
 
 import aiohttp
 
 from cli.output import print_scan_configuration, progress_printer
-from fuzzer.runtime_config import apply_module_runtime_policy
 from fuzzer import EngineStats, FuzzerEngine, Finding
 from fuzzer.auth_provider import merge_scan_cookies, scan_auth_lifecycle
 from fuzzer.request_builder import build_and_send_request, FuzzerResponse
-from fuzzer.setup import count_module_payloads, estimate_total_requests, pipeline_module_types, select_modules
+from fuzzer.setup import (
+    build_pipeline_module_totals,
+    count_module_payloads,
+    estimate_total_requests,
+    pipeline_module_types,
+    select_modules,
+)
 from reporter import ReportGenerator
 from core.models import Payload 
 
@@ -187,7 +193,6 @@ async def run_scan(args, *, base_url: str, surfaces) -> None:
 
 
 async def _run_scan_single(args, *, base_url: str, surfaces) -> None:
-    apply_module_runtime_policy(args.type)
     context = prepare_scan_context(args, surfaces)
     if context is None:
         return
@@ -274,13 +279,7 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
 
     pipeline_types = pipeline_module_types(args)
 
-    module_totals: dict[str, int] = {}
-    for mtype in pipeline_types:
-        mod_args = copy.copy(args)
-        mod_args.type = mtype
-        mods = select_modules(mod_args)
-        if mods:
-            module_totals[mtype] = estimate_total_requests(surfaces, mods)
+    module_totals = build_pipeline_module_totals(surfaces, args)
     overall_total = max(1, sum(module_totals.values()))
     n_modules = len([t for t in pipeline_types if module_totals.get(t, 0) > 0])
     cumulative_completed = 0
@@ -298,18 +297,25 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
         for idx, module_type in enumerate(pipeline_types, 1):
             mod_args = copy.copy(args)
             mod_args.type = module_type
-            apply_module_runtime_policy(module_type)
 
             context = prepare_scan_context(mod_args, surfaces)
             if context is None or module_totals.get(module_type, 0) == 0:
                 print(f"\n[{idx}/{len(pipeline_types)}] {module_type}: skipped (no payloads/surfaces).")
                 continue
 
+            module_total = module_totals[module_type]
+            runtime_total = context["total_requests"]
+            if runtime_total != module_total:
+                print(
+                    f"[WARN] {module_type}: planned={module_total} runtime={runtime_total} "
+                    "(pipeline plan mismatch)"
+                )
+
             module_run_idx += 1
             print(f"\n{separator}")
             print(
                 f"[{module_run_idx}/{n_modules}] Module: {module_type}  "
-                f"({context['total_requests']} requests, "
+                f"({module_total} requests, "
                 f"overall {cumulative_completed}/{overall_total})"
             )
             print(separator)
@@ -347,18 +353,38 @@ async def _run_scan_pipeline(args, *, base_url: str, surfaces) -> None:
             module_output = out_path.with_name(
                 f"{out_path.stem}_{module_type}{out_path.suffix}"
             )
-            module_reporter = ReportGenerator(stats=stats, findings=engine.findings)
+            # [OOM Fix #3] engine._findings 직접 참조 — engine.findings(복사본) 대신 사용
+            module_reporter = ReportGenerator(stats=stats, findings=engine._findings)
             module_reporter.print_cli_report()
             module_reporter.export_to_json(str(module_output))
             print(f"  → intermediate report: {module_output.name}  "
                   f"(findings={stats.findings})")
 
-            all_findings.extend(engine.findings)
+            # [OOM Fix #4] response.text는 중간 리포트까지만 필요하다.
+            # all_findings에 옮기기 전에 5 MB 짜리 응답 본문을 비워 메모리를 확보한다.
+            # _finding_to_dict()는 status/elapsed_time/error만 사용하므로 손실 없음.
+            module_findings = engine.consume_findings()  # 원본 리스트를 이동 (복사 없음)
+            for f in module_findings:
+                if f.response is not None:
+                    f.response.text = ""
+                    f.response.headers = {}  # 헤더도 불필요
+            all_findings.extend(module_findings)
+            del module_findings  # 지역 참조 즉시 해제
+
             merged_stats.queued += stats.queued
             merged_stats.completed += stats.completed
             merged_stats.failures += stats.failures
             merged_stats.findings += stats.findings
-            pipeline_modules.extend(context["modules"])
+
+            # [OOM Fix #2] OOB 모듈만 pipeline_modules에 보존한다.
+            # poll_oob_results()는 generated_tokens 속성을 가진 모듈만 필요하며,
+            # 나머지 모듈 인스턴스(+ 내부 페이로드 캐시)는 즉시 해제한다.
+            pipeline_modules.extend(
+                m for m in context["modules"] if hasattr(m, "generated_tokens")
+            )
+
+            # 모듈 간 GC를 강제해 Python 힙이 OS에 메모리를 돌려줄 수 있게 한다
+            gc.collect()
 
     oob_domain = getattr(args, "oob_domain", "oob.snowden.kr")
     oob_findings = await poll_oob_results(pipeline_modules, oob_domain)

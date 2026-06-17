@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from collections.abc import Callable
 from typing import Any
@@ -38,7 +39,7 @@ def _oob_module_kwargs(args) -> dict:
 
 def _module_defs(args) -> list[_ModuleDef]:
     """
-    `-t all` 파이프라인 순서 = 아래 목록 순서 (웹 UI 공격 모듈 드롭다운과 동일, bruteforce 제외).
+    `-t all` 파이프라인 순서 = 아래 목록 중 accepted에 `"all"` 포함 항목 (bruteforce·stored_xss 제외).
     새 모듈 추가 시 이 목록에 한 줄만 추가하면 select_modules / pipeline 모두 반영된다.
     """
     oob_kwargs = _oob_module_kwargs(args)
@@ -101,7 +102,7 @@ def _module_defs(args) -> list[_ModuleDef]:
         ),
         (
             "stored_xss",
-            ("stored_xss", "all"),
+            ("stored_xss",),
             lambda: StoredXSSModule(
                 bypass_level=getattr(args, "sxss_evasion_level", 1),
                 scan_mode=getattr(args, "sxss_scan_mode", "full"),
@@ -163,21 +164,55 @@ def select_modules(args) -> list:
 
 
 def _module_runtime_payload_count(module) -> int:
-    """실제 실행 목록 기준(변형·필터 포함). get_payload_count()와 다를 수 있음."""
+    """실제 실행 목록 기준(변형·필터 포함).
+
+    get_payload_count()를 우선 시도해 전체 리스트 생성을 피한다.
+    없을 때만 get_payloads()를 호출해 len()으로 계산한다.
+    """
+    # 카운터 메서드가 있으면 리스트를 생성하지 않고 바로 반환
+    if hasattr(module, "get_payload_count"):
+        try:
+            count = module.get_payload_count()
+            if count is not None:
+                return max(0, int(count))
+        except Exception:
+            pass
+    # 폴백: 전체 리스트를 생성해 len()으로 계산 (메모리 비용 큼)
     if hasattr(module, "get_payloads"):
         payloads = module.get_payloads()
         try:
             return len(payloads)
         except TypeError:
-            # SQLi 등 Iterator 반환 모듈은 len() 불가 → get_payload_count() 사용
             pass
-    if hasattr(module, "get_payload_count"):
-        return module.get_payload_count()
     return 0
 
 
 def count_module_payloads(modules: list) -> int:
     return sum(_module_runtime_payload_count(m) for m in modules)
+
+
+def build_pipeline_module_totals(surfaces: list[AttackSurface], args) -> dict[str, int]:
+    """
+    `-t all` 파이프라인 전체 예상 요청 수를 모듈별로 계산한다.
+
+    런타임과 동일한 순서로 ``estimate_total_requests`` 를 돌리되, 공유
+    ``surfaces`` 를 오염시키지 않도록 별도 ``plan_surfaces`` 복제본만 갱신한다.
+    (사전 추정 중 stored_xss 가 surface.parameters 를 채우면 이후 모듈 예상치가
+    달라지므로, 런타임 surface 는 퍼징 시작 시점 그대로 유지해야 한다.)
+    """
+    plan_surfaces = copy.deepcopy(surfaces)
+    module_totals: dict[str, int] = {}
+    for mtype in pipeline_module_types(args):
+        mod_args = copy.copy(args)
+        mod_args.type = mtype
+        mods = select_modules(mod_args)
+        if not mods:
+            continue
+        total = estimate_total_requests(plan_surfaces, mods)
+        if total > 0:
+            module_totals[mtype] = total
+        del mods
+    return module_totals
 
 
 def estimate_total_requests(surfaces: list[AttackSurface], modules: list) -> int:

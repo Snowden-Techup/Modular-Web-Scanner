@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .json
 scan_report.json
-attack_surfaces.json
 scan_report_full.json
+scan_report_*.json
+attack_surfaces.json

@@ -63,16 +63,8 @@ services:
       DATABASE_URL: postgresql+psycopg://admin:adminpassword@db:5432/scanner_db
       # 0=off. 스캔 중 10초마다 메모리를 stdout에 로그 (docker logs / Docker Desktop)
       FUZZER_MEMORY_LOG_INTERVAL: "10"
-      # stored_xss: 응답/분석/verify 본문 상한 (bytes). 미설정 시 runtime_config 기본값 사용.
-      FUZZER_STORED_XSS_ANALYZE_BODY_BYTES: "524288"
-      FUZZER_STORED_XSS_VERIFY_BODY_BYTES: "524288"
-      FUZZER_STORED_XSS_DOM_WINDOW_BYTES: "65536"
       FUZZER_STORED_XSS_MAX_CONCURRENT: "10"
       FUZZER_STORED_XSS_MAX_WORKERS: "2"
-      FUZZER_LFI_ANALYZE_BODY_BYTES: "524288"
-      FUZZER_FILE_UPLOAD_ANALYZE_BODY_BYTES: "524288"
-      FUZZER_FILE_UPLOAD_VERIFY_BODY_BYTES: "262144"
-      FUZZER_FILE_UPLOAD_DISCOVERY_BODY_BYTES: "524288"
     depends_on:
       redis:
         condition: service_healthy

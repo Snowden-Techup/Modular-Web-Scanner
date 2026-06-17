@@ -145,6 +145,17 @@ class FuzzerEngine:
     def findings(self) -> list[Finding]:
         return list(self._findings)
 
+    def consume_findings(self) -> list[Finding]:
+        """내부 findings 리스트를 반환하고 즉시 비운다.
+
+        ``findings`` 프로퍼티(복사본 반환)와 달리 추가 복사 없이 원본 리스트를
+        호출자에게 넘기고 엔진 내부는 새 빈 리스트로 초기화한다.
+        파이프라인 모드에서 모듈 간 메모리 이전 시 사용한다.
+        """
+        findings = self._findings
+        self._findings = []
+        return findings
+
     def _create_session_pool(self) -> list[aiohttp.ClientSession]:
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
         connector_limit = max(

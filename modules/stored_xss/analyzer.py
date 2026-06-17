@@ -863,15 +863,14 @@ def _check_executable_in_response(body: str, payload_value: str, marker: Optiona
     if payload_value not in body and (marker and marker not in body):
         return result
 
-    dom_body = _body_window_for_dom(body, payload_value, marker)
-    payload_idx = dom_body.find(payload_value)
+    payload_idx = body.find(payload_value)
     if payload_idx == -1 and marker:
-        payload_idx = dom_body.find(marker)
+        payload_idx = body.find(marker)
 
     unique_markers = [marker] if marker else _extract_unique_markers(payload_value)
 
     for pattern in _EXECUTABLE_XSS_PATTERNS:
-        for match in pattern.finditer(dom_body):
+        for match in pattern.finditer(body):
             matched_str = match.group(0)
             is_related = payload_value in matched_str
             if not is_related:
@@ -895,13 +894,10 @@ def _check_executable_in_response(body: str, payload_value: str, marker: Optiona
                 result["pattern_type"] = pattern.pattern[:50]
                 return result
 
-    if not get_fuzzer_runtime_config().stored_xss.use_dom_parser:
-        return result
-
     try:
-        soup = BeautifulSoup(dom_body, 'lxml')
+        soup = BeautifulSoup(body, 'lxml')
     except Exception:
-        soup = BeautifulSoup(dom_body, 'html.parser')
+        soup = BeautifulSoup(body, 'html.parser')
 
     try:
         for m in unique_markers:
@@ -964,26 +960,24 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
     if payload_value not in body and not (marker and marker in body):
         return {"executable": False, "location": "not_reflected"}
 
-    dom_body = _body_window_for_dom(body, payload_value, marker)
-    rel_idx = dom_body.find(payload_value)
+    rel_idx = body.find(payload_value)
     if rel_idx == -1 and marker:
-        rel_idx = dom_body.find(marker)
+        rel_idx = body.find(marker)
     if rel_idx < 0:
         return {"executable": False, "location": "not_reflected"}
 
-    if get_fuzzer_runtime_config().stored_xss.use_dom_parser:
-        try:
-            soup = BeautifulSoup(dom_body, 'lxml')
-            texts = soup.find_all(string=True)
-            for text_node in texts:
-                if payload_value in text_node or (marker and marker in text_node):
-                    parent_tag = text_node.parent.name if text_node.parent else ""
-                    if parent_tag not in ['script', 'style', 'iframe']:
-                        return {"executable": False, "location": "safe_text_node"}
-        except Exception:
-            pass
+    try:
+        soup = BeautifulSoup(body, 'lxml')
+        texts = soup.find_all(string=True)
+        for text_node in texts:
+            if payload_value in text_node or (marker and marker in text_node):
+                parent_tag = text_node.parent.name if text_node.parent else ""
+                if parent_tag not in ['script', 'style', 'iframe']:
+                    return {"executable": False, "location": "safe_text_node"}
+    except Exception:
+        pass
 
-    html_before_payload = dom_body[:rel_idx]
+    html_before_payload = body[:rel_idx]
     recent_html = html_before_payload[-500:] if len(html_before_payload) > 500 else html_before_payload
 
     last_open_tag = recent_html.rfind('<')
@@ -1010,7 +1004,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             if quote_char in payload_value or '>' in payload_value:
                 return {"executable": True, "location": "attribute_breakout"}
             else:
-                exec_check = _check_executable_in_response(dom_body, payload_value, marker)
+                exec_check = _check_executable_in_response(body, payload_value, marker)
                 if exec_check["executable"]:
                     return {
                         "executable": True,
@@ -1031,7 +1025,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
     if parser.in_script:
         script_start_idx = html_before_payload.rfind('<script')
         if script_start_idx != -1:
-            js_content = dom_body[script_start_idx:rel_idx]
+            js_content = body[script_start_idx:rel_idx]
             clean_js = _JS_COMMENT_SAFE_PATTERN.sub('', js_content)
 
             single_quotes = clean_js.count("'") - clean_js.count("\\'")
@@ -1048,7 +1042,7 @@ def _analyze_context_robust(body: str, payload_value: str, marker: Optional[str]
             else:
                 return {"executable": True, "location": "script_code_area"}
 
-    exec_check = _check_executable_in_response(dom_body, payload_value, marker)
+    exec_check = _check_executable_in_response(body, payload_value, marker)
     if exec_check["executable"]:
         return {
             "executable": True,
@@ -1162,8 +1156,7 @@ def analyze_stored_xss(
         return result
 
     raw_text = response.text or ""
-    analyze_max = get_analyze_body_max()
-    response_body = raw_text[:analyze_max] if len(raw_text) > analyze_max else raw_text
+    response_body = raw_text
     payload_value = (payload.value or "")[:MAX_PAYLOAD_LENGTH] if payload.value else ""
 
     if not payload_value:

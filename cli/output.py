@@ -15,26 +15,20 @@ async def progress_printer(
     label: str = "",
 ) -> None:
     """Pipeline mode: pass overall_total + baseline_completed for cumulative progress."""
-    last_shown = 0.0
     prefix = f"{label} " if label else ""
 
     while not scan_task.done():
         if overall_total is not None:
             completed = baseline_completed + engine.stats.completed
-            effective_total = max(
-                overall_total,
-                baseline_completed + engine.stats.queued,
-                completed,
-                1,
-            )
+            # Planned denominator only — do not add queued (double-counts pipeline work).
+            effective_total = max(overall_total, completed, 1)
         else:
-            effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
+            effective_total = max(total_requests, engine.stats.completed, 1)
             completed = engine.stats.completed
 
         raw = min(99.9, (completed / effective_total) * 100)
-        last_shown = max(last_shown, raw)
         print(
-            f"\r{prefix}Progress: {last_shown:6.2f}% ({completed}/{effective_total})",
+            f"\r{prefix}Progress: {raw:6.2f}% ({completed}/{effective_total})",
             end="",
             flush=True,
         )
@@ -42,15 +36,10 @@ async def progress_printer(
 
     if overall_total is not None:
         completed = baseline_completed + engine.stats.completed
-        effective_total = max(
-            overall_total,
-            baseline_completed + engine.stats.queued,
-            completed,
-            1,
-        )
+        effective_total = max(overall_total, completed, 1)
         percent = min(100.0, (completed / effective_total) * 100)
     else:
-        effective_total = max(total_requests, engine.stats.queued, engine.stats.completed, 1)
+        effective_total = max(total_requests, engine.stats.completed, 1)
         completed = engine.stats.completed
         percent = 100.0
 

@@ -16,10 +16,12 @@ class LFIModule(BaseModule):
             self._payloads = generate_payloads(evasion_level=self.evasion_level)
         return self._payloads
 
-    def analyze(self, response, payload, elapsed_time, original_res=None, requester=None) -> bool:
+    def analyze(self, response, payload, elapsed_time, original_res=None, requester=None):
         is_vuln, evidences = detect_lfi(
             response=response,
             payload=payload,
             elapsed_time=elapsed_time,
         )
+        if is_vuln and evidences:
+            return True, evidences
         return is_vuln
