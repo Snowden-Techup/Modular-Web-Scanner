@@ -121,16 +121,22 @@ class PayloadMutator:
         return mutations
 
 
-def build_stored_xss_payloads(
+def _resolve_stored_xss_categories(
+        categories: Optional[List[PayloadCategory]],
+) -> List[PayloadCategory]:
+    return categories if categories is not None else list(PayloadCategory)
+
+
+def _iter_stored_xss_payload_entries(
+        *,
         categories: Optional[List[PayloadCategory]] = None,
         max_risk_level: Optional[str] = None,
-        mutation_level: int = 1  # 🌟 변조 레벨 파라미터 추가 (0~3)
-) -> List[Payload]:
-    target_categories = categories if categories is not None else list(PayloadCategory)
+        mutation_level: int = 1,
+):
+    """build_stored_xss_payloads / count_stored_xss_payloads 공통 순회."""
+    target_categories = _resolve_stored_xss_categories(categories)
     risk_order = {"Low": 1, "Medium": 2, "High": 3, "Critical": 4}
     max_risk_value = risk_order.get(max_risk_level, 4) if max_risk_level else 4
-
-    payloads = []
     seen_values: Set[str] = set()
     db = load_payload_database()
 
@@ -143,14 +149,13 @@ def build_stored_xss_payloads(
             if not isinstance(risk_level, str):
                 risk_level = "Medium"
 
-            if not base_value or not isinstance(base_value, str): continue
-            if risk_order.get(risk_level, 0) > max_risk_value: continue
+            if not base_value or not isinstance(base_value, str):
+                continue
+            if risk_order.get(risk_level, 0) > max_risk_value:
+                continue
 
-            # 🌟 변조 로직 적용
             mutated_values = PayloadMutator.mutate(base_value, mutation_level)
-
             for mutated_value in mutated_values:
-                # 고유 마커 생성 및 주입
                 marker = f"xss_{uuid.uuid4().hex[:6]}"
                 b64_marker = base64.b64encode(f"alert('{marker}')".encode()).decode()
                 char_marker = ",".join(str(ord(c)) for c in marker)
@@ -160,13 +165,39 @@ def build_stored_xss_payloads(
                 tracked_value = tracked_value.replace("{{B64_MARKER}}", b64_marker)
                 tracked_value = tracked_value.replace("{{CHAR_MARKER}}", char_marker)
 
-                if tracked_value in seen_values: continue
+                if tracked_value in seen_values:
+                    continue
                 seen_values.add(tracked_value)
+                yield tracked_value, risk_level
 
-                # 파생된 페이로드도 원본과 동일한 위험도로 설정
-                p = Payload(value=tracked_value, attack_type="stored_xss", risk_level=risk_level)
-                payloads.append(p)
 
+def count_stored_xss_payloads(
+        categories: Optional[List[PayloadCategory]] = None,
+        max_risk_level: Optional[str] = None,
+        mutation_level: int = 1,
+) -> int:
+    """mutation·리스크 필터 적용 후 실제 실행 페이로드 수 (get_payloads와 동일 기준)."""
+    return sum(1 for _ in _iter_stored_xss_payload_entries(
+        categories=categories,
+        max_risk_level=max_risk_level,
+        mutation_level=mutation_level,
+    ))
+
+
+def build_stored_xss_payloads(
+        categories: Optional[List[PayloadCategory]] = None,
+        max_risk_level: Optional[str] = None,
+        mutation_level: int = 1,
+) -> List[Payload]:
+    payloads = []
+    for tracked_value, risk_level in _iter_stored_xss_payload_entries(
+        categories=categories,
+        max_risk_level=max_risk_level,
+        mutation_level=mutation_level,
+    ):
+        payloads.append(
+            Payload(value=tracked_value, attack_type="stored_xss", risk_level=risk_level)
+        )
     return payloads
 
 

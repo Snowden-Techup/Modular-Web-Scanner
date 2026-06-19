@@ -3,14 +3,19 @@ import threading
 import re
 import uuid
 from enum import Enum
-from dataclasses import dataclass, asdict, replace
-from collections import OrderedDict
+from dataclasses import dataclass, asdict
 import aiohttp
+import copy
 import asyncio
 
 from modules.base_module import BaseModule
-from core.models import Payload, AttackSurface
-from modules.stored_xss.payloads import build_stored_xss_payloads, PayloadCategory, reload_payloads
+from core.models import Payload
+from modules.stored_xss.payloads import (
+    build_stored_xss_payloads,
+    count_stored_xss_payloads,
+    PayloadCategory,
+    reload_payloads,
+)
 from modules.stored_xss.analyzer import (
     analyze_stored_xss,
     analyze_verify_response,
@@ -21,7 +26,6 @@ from modules.stored_xss.analyzer import (
     is_get_read_only_surface,
     is_reflected_only_param,
     is_success_status,
-    slice_body_for_verify_analysis,
     surface_expects_json_api,
     surface_method_is_get,
     verify_context_matches_parameter,
@@ -29,78 +33,10 @@ from modules.stored_xss.analyzer import (
 )
 from modules.stored_xss.verify_urls import (
     collect_verify_candidate_urls,
-    collect_detail_urls_from_list_response,
+    expand_detail_urls_from_list_bodies,
     infer_list_poll_urls,
 )
 from fuzzer.request_builder import build_and_send_request
-from fuzzer.runtime_config import get_fuzzer_runtime_config
-
-
-class _BoundedProgressBlocks:
-    __slots__ = ("_blocks", "_max_size")
-
-    def __init__(self, max_size: int) -> None:
-        self._blocks: OrderedDict[int, None] = OrderedDict()
-        self._max_size = max(1, max_size)
-
-    def add(self, block: int) -> None:
-        if block in self._blocks:
-            self._blocks.move_to_end(block)
-            return
-        self._blocks[block] = None
-        if len(self._blocks) > self._max_size:
-            self._blocks.popitem(last=False)
-
-    def __contains__(self, block: int) -> bool:
-        return block in self._blocks
-
-    def clear(self) -> None:
-        self._blocks.clear()
-
-
-class _BoundedLockMap:
-    """Per-URL asyncio locks with LRU eviction to cap memory growth."""
-
-    __slots__ = ("_locks", "_max_size")
-
-    def __init__(self, max_size: int = 64) -> None:
-        self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
-        self._max_size = max(1, max_size)
-
-    def lock_for(self, key: str) -> asyncio.Lock:
-        if key in self._locks:
-            self._locks.move_to_end(key)
-            return self._locks[key]
-        lock = asyncio.Lock()
-        self._locks[key] = lock
-        if len(self._locks) > self._max_size:
-            self._locks.popitem(last=False)
-        return lock
-
-    def clear(self) -> None:
-        self._locks.clear()
-
-
-def _clone_surface_for_verify(surface: Any) -> Any:
-    """Shallow clone — only copies mutable request fields (no deepcopy of headers/cookies trees)."""
-    if isinstance(surface, AttackSurface):
-        return replace(
-            surface,
-            parameters=dict(surface.parameters) if surface.parameters else {},
-            headers=dict(surface.headers) if surface.headers else {},
-            cookies=dict(surface.cookies) if surface.cookies else {},
-            dynamic_tokens=dict(surface.dynamic_tokens) if surface.dynamic_tokens else {},
-        )
-    cloned = replace(surface) if hasattr(surface, "__dataclass_fields__") else surface
-    for attr in ("parameters", "headers", "cookies", "dynamic_tokens"):
-        value = getattr(cloned, attr, None)
-        if isinstance(value, dict):
-            setattr(cloned, attr, dict(value))
-    return cloned
-
-
-def _stored_xss_runtime():
-    return get_fuzzer_runtime_config().stored_xss
 
 
 class ScanMode(Enum):
@@ -148,20 +84,20 @@ class StoredXSSModule(BaseModule):
         self._last_analysis_result: Optional[Dict[str, Any]] = None
         self._stats_lock = threading.Lock()  # 동기 함수용
         self._async_stats_lock = asyncio.Lock()  # 비동기 함수(verify)용
-        self._cached_payloads: Optional[List[Payload]] = None
 
-        sx_cfg = _stored_xss_runtime()
-        self._target_locks = _BoundedLockMap(max_size=sx_cfg.lock_map_size)
-        self._verify_semaphore = asyncio.Semaphore(max(1, sx_cfg.verify_concurrency))
-        self._logged_progress_blocks = _BoundedProgressBlocks(sx_cfg.progress_log_blocks_max)
+        #  묶음 검증(배치)을 위한 캐시 및 Lock 변수
+        self._target_locks: Dict[str, asyncio.Lock] = {}
+        self._html_cache: Dict[str, Dict[str, Any]] = {}
+        self._logged_progress_blocks: set = set()
+        self._cached_payloads: List[Payload] | None = None
 
     def reset_stats(self) -> None:
         with self._stats_lock:
             self.stats = ScanStats()
             self._last_analysis_result = None
             self._logged_progress_blocks.clear()
+            self._html_cache.clear()
             self._target_locks.clear()
-            self._cached_payloads = None
 
     def set_baseline(self, response: Any) -> None:
         if response and hasattr(response, 'text') and response.text:
@@ -169,6 +105,15 @@ class StoredXSSModule(BaseModule):
 
     def reload_database(self) -> None:
         reload_payloads()
+        self._cached_payloads = None
+
+    def _resolve_payload_categories(self) -> list[PayloadCategory] | None:
+        if self.scan_mode == ScanMode.QUICK:
+            return [PayloadCategory.BASIC, PayloadCategory.EVENT_HANDLER]
+        raw_cats = self.categories
+        if raw_cats:
+            return [PayloadCategory(c) for c in raw_cats]
+        return None
 
     def get_target_parameters(self, surface, parameters: List[str]) -> List[str]:
         # 저장형 XSS는 데이터 변경 엔드포인트(POST 등)가 대상. GET 목록·상세 조회는 반사형 영역.
@@ -223,28 +168,27 @@ class StoredXSSModule(BaseModule):
         if self._cached_payloads is not None:
             return self._cached_payloads
         try:
-            categories = [PayloadCategory.BASIC,
-                          PayloadCategory.EVENT_HANDLER] if self.scan_mode == ScanMode.QUICK else None
-            if not categories:
-                raw_cats = self.categories
-                categories = [PayloadCategory(c) for c in raw_cats] if raw_cats else None
-
             payloads = build_stored_xss_payloads(
-                categories=categories,
+                categories=self._resolve_payload_categories(),
                 max_risk_level=self.max_risk_level,
-                mutation_level=self.bypass_level
+                mutation_level=self.bypass_level,
             )
+            self._cached_payloads = payloads
             with self._stats_lock:
                 self.stats.total_payloads = len(payloads)
-            self._cached_payloads = payloads
             return payloads
         except ValueError:
             self._cached_payloads = []
             return []
 
     def get_payload_count(self) -> int:
-        # Must match get_payloads() (mutation_level, categories, risk filter).
-        return len(self.get_payloads())
+        if self._cached_payloads is not None:
+            return len(self._cached_payloads)
+        return count_stored_xss_payloads(
+            categories=self._resolve_payload_categories(),
+            max_risk_level=self.max_risk_level,
+            mutation_level=self.bypass_level,
+        )
 
     def analyze(
             self,
@@ -266,7 +210,7 @@ class StoredXSSModule(BaseModule):
                 response,
                 payload,
                 elapsed_time,
-                None if baseline_text else original_res,
+                original_res,
                 requester,
                 baseline_text,
                 surface=surface,
@@ -296,29 +240,12 @@ class StoredXSSModule(BaseModule):
         후보 URL은 verify_urls.collect_verify_candidate_urls (앱별 하드코딩 없음)로 수집한다.
         """
         try:
-            async with self._verify_semaphore:
-                return await self._run_verify(
-                    session, surface, parameter, payload, response, baseline_response
-                )
-        except Exception:
-            return False
-
-    async def _run_verify(
-        self,
-        session: aiohttp.ClientSession,
-        surface: Any,
-        parameter: str,
-        payload: Payload,
-        response: Any,
-        baseline_response: Any,
-    ) -> bool:
-        try:
             payload_value = payload.value or ""
             original_marker = _extract_injected_marker(payload_value)
             if not original_marker:
                 return False
 
-            safe_surface = _clone_surface_for_verify(surface)
+            safe_surface = copy.deepcopy(surface)
             safe_param_name = re.sub(r'[^a-zA-Z0-9_]', '', parameter)
             verify_id = uuid.uuid4().hex[:6]
             verify_marker = f"vfy_{safe_param_name}_{verify_id}"
@@ -341,13 +268,11 @@ class StoredXSSModule(BaseModule):
 
             req_headers = getattr(surface, "headers", {}) or {}
             prefers_json = surface_expects_json_api(safe_surface)
-            sx_cfg = _stored_xss_runtime()
-
             candidate_urls = collect_verify_candidate_urls(
                 base_url=base_url,
                 surface=safe_surface,
                 injection_res=injection_res,
-                max_urls=sx_cfg.verify_max_urls,
+                max_urls=8,
             )
 
             await asyncio.sleep(1.0 if prefers_json else 0.75)
@@ -358,12 +283,12 @@ class StoredXSSModule(BaseModule):
                 if prefers_json
                 else []
             )
+            list_bodies: list[tuple[str, str]] = []
             verify_headers_base = build_verify_request_headers(
                 safe_surface, base_url, req_headers
             )
-            seen_detail_urls: set[str] = set()
             # 목록 URL이 후보에 이미 있어도 id→view URL 생성을 위해 반드시 fetch한다.
-            for list_url in list_poll_urls[: sx_cfg.list_poll_max]:
+            for list_url in list_poll_urls[:3]:
                 try:
                     async with session.get(
                         list_url,
@@ -371,53 +296,65 @@ class StoredXSSModule(BaseModule):
                         cookies=getattr(surface, "cookies", None),
                         timeout=15,
                     ) as list_res:
-                        if not is_success_status(list_res.status):
-                            continue
-                        list_text = await list_res.text(errors="replace")
-                        for detail_url in collect_detail_urls_from_list_response(
-                            list_text,
-                            base_url=base_url,
-                            surface=safe_surface,
-                            injection_body=injection_body,
-                            surface_url=str(getattr(safe_surface, "url", "") or ""),
-                            max_items=sx_cfg.verify_detail_max_items,
-                        ):
-                            if detail_url not in seen_detail_urls:
-                                seen_detail_urls.add(detail_url)
-                                if detail_url not in candidate_urls:
-                                    candidate_urls.insert(0, detail_url)
+                        if is_success_status(list_res.status):
+                            list_bodies.append((list_url, await list_res.text()))
                 except Exception:
                     continue
+            for detail_url in expand_detail_urls_from_list_bodies(
+                list_bodies,
+                base_url=base_url,
+                surface=safe_surface,
+                injection_body=injection_body,
+                surface_url=str(getattr(safe_surface, "url", "") or ""),
+                max_items=4,
+            ):
+                if detail_url not in candidate_urls:
+                    candidate_urls.insert(0, detail_url)
 
             is_vulnerable = False
             verified_location = ""
             hit_url = ""
+            fetch_cache: Dict[str, Dict[str, Any]] = {}
 
             for check_url in candidate_urls:
+                if check_url not in self._target_locks:
+                    self._target_locks[check_url] = asyncio.Lock()
+
                 verify_body = ""
                 verify_status = 0
                 verify_response_headers: dict[str, str] = {}
                 verify_headers = build_verify_request_headers(
                     safe_surface, check_url, req_headers
                 )
-                async with self._target_locks.lock_for(check_url):
-                    try:
-                        req_cookies = getattr(surface, 'cookies', None)
-                        async with session.get(
-                            check_url,
-                            headers=verify_headers,
-                            cookies=req_cookies,
-                            timeout=15,
-                        ) as verify_res:
-                            verify_status = verify_res.status
-                            if not is_success_status(verify_status):
-                                continue
-                            verify_body = await verify_res.text(errors="replace")
-                            verify_response_headers = {
-                                str(k): str(v) for k, v in verify_res.headers.items()
-                            }
-                    except Exception:
-                        continue
+                async with self._target_locks[check_url]:
+                    cached = fetch_cache.get(check_url)
+                    if cached is not None:
+                        verify_status = cached.get("status", 0)
+                        verify_body = cached.get("body", "")
+                        verify_response_headers = cached.get("headers", {})
+                    else:
+                        try:
+                            req_cookies = getattr(surface, 'cookies', None)
+                            async with session.get(
+                                check_url,
+                                headers=verify_headers,
+                                cookies=req_cookies,
+                                timeout=15,
+                            ) as verify_res:
+                                verify_status = verify_res.status
+                                if not is_success_status(verify_status):
+                                    continue
+                                verify_body = await verify_res.text()
+                                verify_response_headers = {
+                                    str(k): str(v) for k, v in verify_res.headers.items()
+                                }
+                                fetch_cache[check_url] = {
+                                    "status": verify_status,
+                                    "body": verify_body,
+                                    "headers": verify_response_headers,
+                                }
+                        except Exception:
+                            continue
 
                 if not is_acceptable_verify_response(
                     verify_status, verify_body, marker=verify_marker
@@ -427,13 +364,8 @@ class StoredXSSModule(BaseModule):
                 if verify_marker not in verify_body:
                     continue
 
-                analysis_body = slice_body_for_verify_analysis(
-                    verify_body,
-                    verify_marker,
-                    headers=verify_response_headers,
-                )
                 context_state = analyze_verify_response(
-                    analysis_body,
+                    verify_body,
                     verify_marker,
                     verify_marker,
                     headers=verify_response_headers,
